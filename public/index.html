@@ -384,6 +384,7 @@ function render() {
         <span class="project-path">${esc(p.cwd)}</span>
         <button class="new-btn" data-newterm="${esc(p.cwd)}">+ New terminal</button>
         <button data-newchat="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="Start a session right here — no terminal window">+ New in browser</button>
+        <button data-newisolated="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="New session in its own git worktree — safe parallel changes">+ New isolated</button>
       </div>
       <div class="sessions">`;
 
@@ -461,6 +462,7 @@ document.getElementById('content').addEventListener('click', e => {
   if (btn) {
     if (btn.dataset.newterm) openTerminal({ cwd: btn.dataset.newterm });
     else if (btn.dataset.newchat) openNewChat(btn.dataset.newchat, btn.dataset.newname || btn.dataset.newchat);
+    else if (btn.dataset.newisolated) openIsolated(btn.dataset.newisolated, btn.dataset.newname || btn.dataset.newisolated);
     else if (btn.dataset.resume) openTerminal({ cwd: btn.dataset.cwd, sessionId: btn.dataset.resume });
     else if (btn.dataset.copy) {
       const cmd = `cd ${JSON.stringify(btn.dataset.cwd)} && claude --resume ${btn.dataset.copy}`;
@@ -537,6 +539,23 @@ function closeChat() {
   clearInterval(chat.poll);
   chat.sessionId = null;
   resetTabSignal();
+}
+
+// Create an isolated git worktree for this folder, then start a headless
+// session inside it — safe parallel changes that merge back via the wrap-up panel.
+async function openIsolated(cwd, name) {
+  toast('Creating isolated worktree…');
+  try {
+    const r = await fetch('/api/worktree', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd, name }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    load(); // surface the new worktree in the session list
+    openNewChat(j.path, name + ' (' + j.branch + ')');
+    toast('Worktree ' + j.branch);
+  } catch (e) { toast('Worktree failed: ' + e.message, true); }
 }
 
 // --- Traffic-light feedback --------------------------------------------------
@@ -799,6 +818,19 @@ function renderHk() {
   body.querySelectorAll('button[data-push]').forEach(b => b.onclick = () => doPush(b.dataset.push));
   body.querySelectorAll('button[data-assess]').forEach(b => b.onclick = () => doAssess(b.dataset.assess));
   body.querySelectorAll('button[data-close]').forEach(b => b.onclick = () => doClose(b.dataset.close, b.dataset.name));
+  body.querySelectorAll('button[data-merge]').forEach(b => b.onclick = () => doMerge(b.dataset.merge, b.dataset.name));
+}
+
+async function doMerge(wtPath, name) {
+  if (!confirm(`Merge ${name} back into its main checkout and remove the worktree?\n\nRefuses if main has uncommitted changes.`)) return;
+  try {
+    const r = await fetch('/api/worktree-merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: wtPath }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    toast(`Merged ${j.branch} into ${j.into}`); loadHousekeeping();
+  } catch (e) { toast('Merge failed: ' + e.message, true); }
 }
 
 function repoHtml(r) {
@@ -814,6 +846,9 @@ function repoHtml(r) {
   if (g.ahead > 0 && g.hasRemote) actions.push(`<button data-push="${esc(r.cwd)}">Push</button>`);
   if (r.verdict !== 'busy' && r.liveTerminals > 0)
     actions.push(`<button data-close="${esc(r.sessions[0]?.sessionId || '')}" data-name="${esc(r.name)}">Close terminal${r.liveTerminals > 1 ? 's' : ''}</button>`);
+  const isWorktree = /\/\.claude\/worktrees\//.test(r.cwd);
+  if (isWorktree && r.verdict !== 'busy')
+    actions.push(`<button class="primary" data-merge="${esc(r.cwd)}" data-name="${esc(r.name)}">Merge to main</button>`);
   const res = hkResult[r.cwd];
   const resLine = res ? `<div class="hkres ${res.state}">${esc(res.text)}</div>` : '';
   return `<div class="repo">

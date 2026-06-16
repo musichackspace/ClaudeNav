@@ -587,6 +587,67 @@ function gitPush(cwd, cb) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-session git worktrees — each session gets its own isolated clone so
+// parallel sessions never edit the same working tree.
+// ---------------------------------------------------------------------------
+
+function sanitizeLeaf(name) {
+  return (name || 'session').toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'session';
+}
+
+// Create a worktree on a fresh branch off HEAD; returns its path + branch.
+function gitWorktreeAdd(cwd, name, cb) {
+  if (!knownCwds().has(cwd)) return cb(new Error('unknown working directory'));
+  try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') return cb(new Error('not a git repo')); }
+  catch { return cb(new Error('not a git repo')); }
+  const leaf = sanitizeLeaf(name) + '-' + crypto.randomBytes(3).toString('hex');
+  const branch = 'session/' + leaf;
+  const wtPath = path.join(cwd, '.claude', 'worktrees', leaf);
+  try {
+    execFileSync('git', ['-C', cwd, 'worktree', 'add', '-b', branch, wtPath, 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    cb(null, { path: wtPath, branch });
+  } catch (e) {
+    cb(new Error((e.stderr || e.message || 'worktree add failed').toString().trim().slice(0, 300)));
+  }
+}
+
+// Merge a session worktree's branch back into the repo's main checkout, then
+// remove the worktree. Refuses if the main checkout has uncommitted changes
+// (so we never clobber another session's in-flight work).
+function gitWorktreeMerge(wtPath, cb) {
+  try {
+    const branch = git(wtPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const list = git(wtPath, ['worktree', 'list', '--porcelain']);
+    const main = (list.split('\n').find(l => l.startsWith('worktree ')) || '').slice('worktree '.length);
+    if (!main) return cb(new Error('could not locate main worktree'));
+    if (path.resolve(main) === path.resolve(wtPath)) return cb(new Error('this is the main worktree'));
+    if (git(main, ['status', '--porcelain'])) {
+      return cb(new Error('main checkout has uncommitted changes — commit or stash them first'));
+    }
+    // Commit anything pending in the session worktree, then merge into main.
+    if (git(wtPath, ['status', '--porcelain'])) {
+      git(wtPath, ['add', '-A']);
+      execFileSync('git', ['-C', wtPath, 'commit', '-m', 'session changes (ClaudeNav)'], { encoding: 'utf8' });
+    }
+    try {
+      execFileSync('git', ['-C', main, 'merge', '--no-edit', branch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      try { git(main, ['merge', '--abort']); } catch {}
+      return cb(new Error('merge conflict — resolve manually: ' + (e.stderr || e.message || '').toString().trim().slice(0, 200)));
+    }
+    try {
+      execFileSync('git', ['-C', main, 'worktree', 'remove', '--force', wtPath], { encoding: 'utf8' });
+      git(main, ['branch', '-D', branch]);
+    } catch { /* merged fine; cleanup is best-effort */ }
+    cb(null, { merged: true, branch, into: git(main, ['rev-parse', '--abbrev-ref', 'HEAD']) });
+  } catch (e) {
+    cb(new Error((e.stderr || e.message || 'merge error').toString().trim().slice(0, 300)));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wrap-up: AI "is it safe to wrap?" enquiry + graceful exit
 // ---------------------------------------------------------------------------
 
@@ -734,6 +795,26 @@ const server = http.createServer((req, res) => {
     return readBody(req, (err, body) => {
       if (err) return sendJSON(res, 400, { error: 'bad json' });
       gitPush(body.cwd, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/worktree' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      gitWorktreeAdd(body.cwd, body.name, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/worktree-merge' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      gitWorktreeMerge(body.path, (e, info) => {
         if (e) return sendJSON(res, 400, { error: e.message });
         sendJSON(res, 200, { ok: true, ...info });
       });
