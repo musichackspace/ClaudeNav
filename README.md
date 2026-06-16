@@ -55,7 +55,9 @@ even with the tab in the background (it stops flashing when you focus the tab).
 
 - **Resume ▸** — opens a new Terminal (or iTerm) window running
   `claude --resume <session-id>` in that project's directory.
-- **+ New session** — starts a fresh session **headlessly** in that directory
+- **+ New terminal** — opens a new Terminal (or iTerm) window running `claude`
+  in that project's directory, ready for a fresh interactive session.
+- **+ New in browser** — starts a fresh session **headlessly** in that directory
   and drops you into the in-browser chat (no terminal). The session id is chosen
   up front, so the first message creates it (`claude --session-id … -p`) and
   later messages continue it. It shows up in the session list once started.

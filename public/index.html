@@ -383,7 +383,7 @@ function render() {
         <span class="badge">${p.sessions.length} session${p.sessions.length > 1 ? 's' : ''}</span>
         <span class="project-path">${esc(p.cwd)}</span>
         <button class="new-btn" data-newterm="${esc(p.cwd)}">+ New terminal</button>
-        <button data-newchat="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="Start a headless session in the browser">+ New headless</button>
+        <button data-newchat="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="Start a session right here — no terminal window">+ New in browser</button>
       </div>
       <div class="sessions">`;
 
