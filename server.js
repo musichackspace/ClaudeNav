@@ -366,7 +366,34 @@ function parseTranscript(filePath) {
 // the same transcript, which the /api/transcript tailer then surfaces.
 // ---------------------------------------------------------------------------
 
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+// Resolve the `claude` binary robustly. Under a bare shell it's on PATH, but
+// when ClaudeNav is launched by launchd / systemd / a double-click the inherited
+// PATH is minimal and a plain 'claude' spawn fails with ENOENT. So: honor an
+// explicit CLAUDE_BIN, else trust PATH if it resolves, else probe the known
+// install locations before giving up.
+function resolveClaudeBin() {
+  if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
+  // Trust PATH first (respects nvm / custom installs) — `command -v` via the shell.
+  try {
+    const onPath = execFileSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim();
+    if (onPath) return onPath;
+  } catch { /* not on PATH; fall through to probing */ }
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, '.local', 'bin', 'claude'),
+    path.join(home, '.claude', 'local', 'claude'),
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+    '/usr/bin/claude',
+  ];
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
+  }
+  console.warn('[claudenav] WARNING: could not locate the `claude` binary — headless turns will fail with ENOENT. Set CLAUDE_BIN to its path.');
+  return 'claude'; // last resort; will ENOENT, but with the warning above to explain it
+}
+const CLAUDE_BIN = resolveClaudeBin();
+console.log(`[claudenav] using claude binary: ${CLAUDE_BIN}`);
 // Sessions run with skipped permissions so the assistant can actually use tools
 // (matches how these terminal sessions were started). Set CLAUDE_SAFE=1 to omit.
 const SKIP_PERMS = process.env.CLAUDE_SAFE !== '1';

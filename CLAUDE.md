@@ -24,9 +24,24 @@ node server.js          # http://127.0.0.1:4317
 PORT=5000 node server.js
 ```
 
-Run it **detached** so it survives the tool wrapper: `nohup node server.js > /tmp/claudenav.log 2>&1 & disown`.
-A foreground `run_in_background` wrapper does **not** keep the long-lived server
-alive (caused stale duplicate instances during development).
+For day-to-day use, run it as a **LaunchAgent** so it survives logout, restarts
+on crash, and runs at login:
+
+```bash
+./install-launchagent.sh            # generates the plist from THIS machine's paths, loads it
+./install-launchagent.sh uninstall  # stop + remove
+```
+
+This is the canonical run method. It wraps `run-server.sh` (crash-restart loop
+with a 3-crashes-in-60s cap; appends timestamped start/exit lines to
+`/tmp/claudenav.log`) and pins `PATH` + `CLAUDE_BIN` so headless turns work
+under launchd's minimal environment.
+
+> **Do NOT rely on `nohup … & disown` when launched from inside a tool wrapper.**
+> Processes spawned by a tool call (incl. via `nohup`/`disown`/`setsid`) get
+> SIGTERM'd after ~90s — the server's shutdown handler then exits 0, so it looks
+> like a clean stop, not a crash. Only a launcher that owns the process
+> independently (launchd) escapes this. A normal terminal run is fine.
 
 ## API
 
@@ -49,6 +64,13 @@ alive (caused stale duplicate instances during development).
 
 - Headless turns run with `--dangerously-skip-permissions` (set `CLAUDE_SAFE=1`
   to drop). `CLAUDE_BIN` overrides the `claude` path.
+- **Finding `claude`**: `resolveClaudeBin()` honors `CLAUDE_BIN`, else trusts
+  `command -v claude`, else probes known install dirs (`~/.local/bin`,
+  `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`). This is
+  why headless turns work under launchd even though `claude` is off its minimal
+  PATH. If none resolve, it logs a WARNING at startup and turns fail with
+  `spawn claude ENOENT` — set `CLAUDE_BIN` to fix. The startup log prints the
+  resolved path (`[claudenav] using claude binary: …`).
 - The Markdown renderer uses **space-delimited** placeholders (` CB0 `, ` IMG… `);
   an earlier edit corrupted these to null bytes and made the file read as binary —
   keep them spaces.
