@@ -21,8 +21,10 @@ while true; do
   fi
   fails=$(( fails + 1 ))
   if [ "$fails" -ge "$MAX_CRASHES" ]; then
-    echo "=== gave up after $fails crashes within ${WINDOW}s — not restarting ===" >> "$LOG"
-    exit "$code"
+    # Exit 0 so launchd (KeepAlive: SuccessfulExit=false) treats this as an
+    # intentional stop and does NOT relaunch us — the crash cause is logged above.
+    echo "=== gave up after $fails crashes within ${WINDOW}s — not restarting (last code $code) ===" >> "$LOG"
+    exit 0
   fi
   echo "=== restarting in 2s after crash ($fails/$MAX_CRASHES) ===" >> "$LOG"
   sleep 2
