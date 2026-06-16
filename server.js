@@ -181,19 +181,32 @@ function getLiveTerminals() {
 // ---------------------------------------------------------------------------
 
 // Classify a session's state from its tail records + liveness.
-//   working  — Claude is mid-turn (last record is a prompt/tool, or stopped to
-//              run a tool), so it's busy or about to respond.
-//   waiting  — last assistant turn ended (end_turn) and a terminal is live /
-//              recently active: it's your turn, waiting for more input.
-//   idle     — finished and parked; ready to be wrapped up or resumed later.
+//   working      — mid-turn and active: a terminal is live, it was just touched,
+//                  or the server itself is running a headless turn for it.
+//   waiting      — last assistant turn ended (end_turn) and it's live/recent:
+//                  your turn, waiting for input.
+//   idle         — parked: nothing running. Includes mid-turn sessions that are
+//                  merely paused or running headless somewhere we can't detect —
+//                  we do NOT cry "interrupted" for those.
+//   interrupted  — mid-turn and untouched for 30+ min: genuinely left half-done.
 function computeStatus(s) {
-  const recentMs = Date.now() - (s.mtimeMs || 0);
-  const veryRecent = recentMs < 30 * 1000;      // touched in last 30s
-  const recent = recentMs < 5 * 60 * 1000;      // touched in last 5 min
-  const ended = s.lastStopReason === 'end_turn';
+  // A turn this server is running (or has queued) for the session counts as live,
+  // even when ps+lsof can't see a terminal for it (headless / IDE / remote).
+  const serverActive = runningChats.has(s.sessionId)
+    || (chatQueues.get(s.sessionId) || []).length > 0;
+  if (serverActive) return 'working';
 
-  if (s.lastEventType === 'user' || (s.lastStopReason && !ended)) {
-    return veryRecent || s.likelyLive ? 'working' : 'interrupted';
+  const recentMs = Date.now() - (s.mtimeMs || 0);
+  const veryRecent = recentMs < 30 * 1000;          // touched in last 30s
+  const recent = recentMs < 5 * 60 * 1000;          // touched in last 5 min
+  const longAbandoned = recentMs > 30 * 60 * 1000;  // mid-turn, untouched 30 min+
+  const ended = s.lastStopReason === 'end_turn';
+  const midTurn = s.lastEventType === 'user' || (s.lastStopReason && !ended);
+
+  if (midTurn) {
+    if (veryRecent || s.likelyLive) return 'working';
+    if (longAbandoned) return 'interrupted';  // really left half-done → needs you
+    return 'idle';                            // paused / headless — don't alarm
   }
   if (ended && (s.likelyLive || recent)) return 'waiting';
   return 'idle';
