@@ -564,6 +564,97 @@ function housekeeping() {
   return { repos, generatedAt: Date.now() };
 }
 
+// ---------------------------------------------------------------------------
+// Repo history — local git stats for the in-browser visualiser
+// ---------------------------------------------------------------------------
+
+// Like git() but tolerates the large output of a full `git log` (the default
+// 1MB execFileSync buffer overflows on big repos).
+function gitOut(cwd, args, maxBuffer = 64 * 1024 * 1024) {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer });
+}
+
+// Build a full history snapshot for one repo from local git, entirely offline:
+// overview, weekly commit volume, top contributors, a weekday×hour punch-card,
+// a by-extension byte breakdown, and the most recent commits. Restricted to
+// known-session directories (same guard as the git write endpoints).
+function repoHistory(cwd) {
+  if (!knownCwds().has(cwd)) { const e = new Error('unknown working directory'); e.status = 403; throw e; }
+  try {
+    if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') throw new Error('x');
+  } catch { const e = new Error('not a git repository'); e.status = 400; throw e; }
+
+  const US = '\x1f'; // unit separator — safe field delimiter inside git formats
+  let branch = '', head = '', remoteUrl = '';
+  try { branch = git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']); } catch {}
+  try { head = git(cwd, ['rev-parse', '--short', 'HEAD']); } catch {}
+  try { remoteUrl = git(cwd, ['remote', 'get-url', 'origin']); } catch {}
+
+  // One pass over every commit: author name, email, ISO author date.
+  let raw = '';
+  try { raw = gitOut(cwd, ['log', `--format=%an${US}%ae${US}%aI`]); } catch {}
+  const lines = raw.split('\n').filter(Boolean);
+
+  const WEEKS = 52;
+  const MS_WEEK = 7 * 24 * 3600 * 1000;
+  const now = Date.now();
+  const weekly = new Array(WEEKS).fill(0);
+  const punchCard = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  const contribMap = new Map(); // name<email> -> { name, count }
+  let firstDate = null, lastDate = null;
+
+  for (const line of lines) {
+    const [name, email, iso] = line.split(US);
+    const key = (name || '') + '<' + (email || '') + '>';
+    const c = contribMap.get(key) || { name: name || 'unknown', count: 0 };
+    c.count++; contribMap.set(key, c);
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) continue;
+    if (firstDate === null || t < firstDate) firstDate = t;
+    if (lastDate === null || t > lastDate) lastDate = t;
+    const d = new Date(t);
+    punchCard[d.getDay()][d.getHours()]++;
+    const weeksAgo = Math.floor((now - t) / MS_WEEK);
+    if (weeksAgo >= 0 && weeksAgo < WEEKS) weekly[WEEKS - 1 - weeksAgo]++;
+  }
+
+  // Byte share by file extension across tracked files (a rough "languages").
+  const languages = {};
+  try {
+    const files = gitOut(cwd, ['ls-files']).split('\n').filter(Boolean);
+    for (const f of files.slice(0, 50000)) {
+      const base = f.slice(f.lastIndexOf('/') + 1);
+      const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1).toLowerCase() : '(none)';
+      let size = 0;
+      try { size = fs.statSync(path.join(cwd, f)).size; } catch {}
+      languages[ext] = (languages[ext] || 0) + size;
+    }
+  } catch {}
+
+  // Latest commits with subject lines (separate, small query).
+  let recentCommits = [];
+  try {
+    recentCommits = gitOut(cwd, ['log', '-20', `--format=%h${US}%an${US}%aI${US}%s`])
+      .split('\n').filter(Boolean)
+      .map(l => { const [sha, author, date, message] = l.split(US); return { sha, author, date, message }; });
+  } catch {}
+
+  return {
+    repo: {
+      name: cwd.split('/').filter(Boolean).slice(-1)[0] || cwd,
+      cwd, branch, head, remoteUrl,
+      totalCommits: lines.length,
+      contributors: contribMap.size,
+      firstDate, lastDate,
+    },
+    weekly,
+    punchCard,
+    contributors: [...contribMap.values()].sort((a, b) => b.count - a.count).slice(0, 20),
+    languages,
+    recentCommits,
+  };
+}
+
 function gitCommit(cwd, message, cb) {
   if (!knownCwds().has(cwd)) return cb(new Error('unknown working directory'));
   const msg = (message || '').trim() || 'checkpoint (ClaudeNav wrap-up)';
@@ -779,6 +870,12 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/housekeeping') {
     try { return sendJSON(res, 200, housekeeping()); }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/repo-history') {
+    const cwd = url.searchParams.get('cwd') || '';
+    try { return sendJSON(res, 200, repoHistory(cwd)); }
+    catch (e) { return sendJSON(res, e.status || 500, { error: e.message }); }
   }
 
   if (url.pathname === '/api/commit' && req.method === 'POST') {

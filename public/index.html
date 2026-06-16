@@ -207,6 +207,30 @@
     border-radius: 50%; background: var(--panel2); border: 1px solid var(--border);
     color: var(--text); font-size: 13px; line-height: 1; cursor: pointer;
   }
+
+  /* Repo history visualiser */
+  .viz { width: min(900px, 95%); }
+  .viz-section { margin: 18px 0; }
+  .viz-section h3 { font-size: 11px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .viz-stats { display: flex; flex-wrap: wrap; gap: 10px; }
+  .viz-stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; min-width: 86px; }
+  .viz-stat b { font-size: 18px; display: block; line-height: 1.2; }
+  .viz-stat span { color: var(--muted); font-size: 11px; }
+  .bars { display: flex; align-items: flex-end; gap: 2px; height: 96px; background: var(--panel); padding: 8px; border-radius: 8px; border: 1px solid var(--border); }
+  .bars i { flex: 1; background: var(--accent); min-height: 1px; border-radius: 1px 1px 0 0; opacity: .85; }
+  .bars i:hover { opacity: 1; }
+  .crow { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
+  .crow .cname { width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .crow .cbar { height: 10px; background: var(--accent); border-radius: 2px; min-width: 2px; }
+  .crow .ccount { color: var(--muted); width: 52px; text-align: right; }
+  .punch { display: grid; grid-template-columns: 34px repeat(24, 1fr); gap: 2px; align-items: center; }
+  .punch .plabel { font-size: 10px; color: var(--muted); }
+  .punch .pcell { aspect-ratio: 1; background: var(--accent); border-radius: 2px; min-height: 9px; }
+  .punch .phour { font-size: 9px; color: var(--muted); text-align: center; }
+  .commit { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .commit .sha { font-family: ui-monospace, monospace; color: var(--accent); }
+  .commit .cmsg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .commit .cmeta { color: var(--muted); white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -256,6 +280,19 @@
       <button class="chat-close" id="hkClose" title="Close">×</button>
     </div>
     <div id="hkBody" class="hk-body"></div>
+  </div>
+</div>
+
+<div id="vizOverlay" class="overlay center">
+  <div class="hk viz">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle" id="vizTitle">📊 Repository history</div>
+        <div class="csub" id="vizSub">Loading…</div>
+      </div>
+      <button class="chat-close" id="vizClose" title="Close">×</button>
+    </div>
+    <div id="vizBody" class="hk-body"></div>
   </div>
 </div>
 
@@ -385,6 +422,7 @@ function render() {
         <button class="new-btn" data-newterm="${esc(p.cwd)}">+ New terminal</button>
         <button data-newchat="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="Start a session right here — no terminal window">+ New in browser</button>
         <button data-newisolated="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="New session in its own git worktree — safe parallel changes">+ New isolated</button>
+        <button data-viz="${esc(p.cwd)}" data-vizname="${esc(p.name)}" title="Visualise this repo's git history">📊 Visualise</button>
       </div>
       <div class="sessions">`;
 
@@ -468,6 +506,7 @@ document.getElementById('content').addEventListener('click', e => {
       const cmd = `cd ${JSON.stringify(btn.dataset.cwd)} && claude --resume ${btn.dataset.copy}`;
       navigator.clipboard.writeText(cmd).then(() => toast('Copied: ' + cmd));
     }
+    else if (btn.dataset.viz) openViz(btn.dataset.viz, btn.dataset.vizname || btn.dataset.viz);
     return;
   }
   const row = e.target.closest('.session');
@@ -766,7 +805,107 @@ document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('overlay').addEventListener('click', e => {
   if (e.target.id === 'overlay') closeChat();
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); } });
+
+// ---- Repo history visualiser ----------------------------------------------
+function closeViz() { document.getElementById('vizOverlay').classList.remove('show'); }
+
+async function openViz(cwd, name) {
+  document.getElementById('vizOverlay').classList.add('show');
+  document.getElementById('vizTitle').textContent = '📊 ' + name;
+  document.getElementById('vizSub').textContent = cwd;
+  const body = document.getElementById('vizBody');
+  body.innerHTML = '<div class="empty">Reading git history…</div>';
+  try {
+    const r = await fetch('/api/repo-history?cwd=' + encodeURIComponent(cwd));
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    body.innerHTML = renderViz(d);
+  } catch (e) {
+    body.innerHTML = '<div class="empty">Could not load history: ' + esc(e.message) + '</div>';
+  }
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+function fmtDate(iso) {
+  const t = typeof iso === 'number' ? iso : Date.parse(iso);
+  return Number.isNaN(t) ? '—' : new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function renderViz(d) {
+  const r = d.repo || {};
+  let h = '';
+
+  // Overview stats
+  h += `<div class="viz-section"><div class="viz-stats">
+    <div class="viz-stat"><b>${(r.totalCommits || 0).toLocaleString()}</b><span>commits</span></div>
+    <div class="viz-stat"><b>${(r.contributors || 0).toLocaleString()}</b><span>contributors</span></div>
+    <div class="viz-stat"><b>${esc(r.branch || '—')}</b><span>branch @ ${esc(r.head || '')}</span></div>
+    <div class="viz-stat"><b>${fmtDate(r.firstDate)}</b><span>first commit</span></div>
+    <div class="viz-stat"><b>${fmtDate(r.lastDate)}</b><span>latest commit</span></div>
+  </div>${r.remoteUrl ? `<div class="csub" style="margin-top:8px">⎇ ${esc(r.remoteUrl)}</div>` : ''}</div>`;
+
+  // Commits per week (52w)
+  const weekly = d.weekly || [];
+  const maxW = Math.max(1, ...weekly);
+  h += `<div class="viz-section"><h3>Commits per week · last 52 weeks</h3>
+    <div class="bars">${weekly.map((c, i) =>
+      `<i style="height:${Math.round(c / maxW * 100)}%" title="${52 - i}w ago: ${c} commit${c !== 1 ? 's' : ''}"></i>`).join('')}</div></div>`;
+
+  // Top contributors
+  const contribs = d.contributors || [];
+  if (contribs.length) {
+    const maxC = Math.max(1, ...contribs.map(c => c.count));
+    h += `<div class="viz-section"><h3>Top contributors</h3>${contribs.map(c =>
+      `<div class="crow"><span class="cname" title="${esc(c.name)}">${esc(c.name)}</span>` +
+      `<span class="cbar" style="width:${Math.round(c.count / maxC * 100)}%"></span>` +
+      `<span class="ccount">${c.count.toLocaleString()}</span></div>`).join('')}</div>`;
+  }
+
+  // Languages (by extension byte share)
+  const langs = Object.entries(d.languages || {}).sort((a, b) => b[1] - a[1]);
+  const totalBytes = langs.reduce((s, [, n]) => s + n, 0);
+  if (langs.length && totalBytes) {
+    const top = langs.slice(0, 10);
+    const maxL = top[0][1];
+    h += `<div class="viz-section"><h3>Code by file type</h3>${top.map(([ext, bytes]) =>
+      `<div class="crow"><span class="cname">.${esc(ext)}</span>` +
+      `<span class="cbar" style="width:${Math.round(bytes / maxL * 100)}%"></span>` +
+      `<span class="ccount">${(bytes / totalBytes * 100).toFixed(0)}%</span></div>`).join('')}</div>`;
+  }
+
+  // Punch-card heatmap (weekday × hour)
+  const pc = d.punchCard || [];
+  const maxP = Math.max(1, ...pc.flat());
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  let cells = '<span class="plabel"></span>';
+  for (let hr = 0; hr < 24; hr++) cells += `<span class="phour">${hr % 6 === 0 ? hr : ''}</span>`;
+  for (let day = 0; day < 7; day++) {
+    cells += `<span class="plabel">${days[day]}</span>`;
+    for (let hr = 0; hr < 24; hr++) {
+      const v = (pc[day] && pc[day][hr]) || 0;
+      const op = v ? (0.15 + 0.85 * v / maxP).toFixed(2) : 0.06;
+      cells += `<span class="pcell" style="opacity:${op}" title="${days[day]} ${hr}:00 — ${v} commit${v !== 1 ? 's' : ''}"></span>`;
+    }
+  }
+  h += `<div class="viz-section"><h3>When commits happen · weekday × hour (local time)</h3><div class="punch">${cells}</div></div>`;
+
+  // Recent commits
+  const rc = d.recentCommits || [];
+  if (rc.length) {
+    h += `<div class="viz-section"><h3>Recent commits</h3>${rc.map(c =>
+      `<div class="commit"><span class="sha">${esc(c.sha)}</span>` +
+      `<span class="cmsg" title="${esc(c.message)}">${esc(c.message)}</span>` +
+      `<span class="cmeta">${esc(c.author)} · ${timeAgo(Date.parse(c.date))}</span></div>`).join('')}</div>`;
+  }
+
+  return h;
+}
 
 async function load() {
   try {
@@ -941,6 +1080,8 @@ document.getElementById('wrapup').addEventListener('click', openHousekeeping);
 document.getElementById('hkClose').addEventListener('click', closeHousekeeping);
 document.getElementById('hkRefresh').addEventListener('click', loadHousekeeping);
 document.getElementById('hkOverlay').addEventListener('click', e => { if (e.target.id === 'hkOverlay') closeHousekeeping(); });
+document.getElementById('vizClose').addEventListener('click', closeViz);
+document.getElementById('vizOverlay').addEventListener('click', e => { if (e.target.id === 'vizOverlay') closeViz(); });
 
 document.getElementById('search').addEventListener('input', render);
 document.getElementById('refresh').addEventListener('click', load);
