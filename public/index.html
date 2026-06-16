@@ -119,6 +119,33 @@
     align-items: stretch; justify-content: flex-end; z-index: 100;
   }
   .overlay.show { display: flex; }
+  .overlay.center { align-items: center; justify-content: center; }
+
+  /* Housekeeping panel */
+  .hk { width: min(720px, 94%); max-height: 86vh; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; }
+  .hk-body { overflow-y: auto; padding: 8px 16px 16px; }
+  .repo { border: 1px solid var(--border); border-radius: 10px; margin-top: 12px; overflow: hidden; }
+  .repo-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--panel); }
+  .repo-name { font-weight: 600; }
+  .repo-path { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vbadge { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+  .vbadge.clean { background: rgba(63,185,80,.16); color: var(--live); }
+  .vbadge.dirty { background: rgba(227,179,65,.18); color: #e3b341; }
+  .vbadge.unpushed { background: rgba(88,166,255,.18); color: #58a6ff; }
+  .vbadge.busy { background: rgba(248,81,73,.16); color: #f85149; }
+  .repo-detail { padding: 8px 14px 12px; font-size: 12.5px; }
+  .repo-detail .gitline { color: var(--muted); margin-bottom: 8px; }
+  .repo-detail .files { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--muted); max-height: 120px; overflow-y: auto; margin-bottom: 10px; white-space: pre-wrap; }
+  .repo-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .repo-actions button { font-size: 12px; padding: 6px 11px; }
+  .repo-actions .primary { background: var(--accent); border-color: var(--accent); color: #1b1206; font-weight: 600; }
+  .hk-bulk { display: flex; gap: 10px; align-items: center; padding: 10px 0 4px; }
+  .hk-bulk .primary { background: var(--accent); border-color: var(--accent); color: #1b1206; font-weight: 600; }
+  .hk-bulk .hint { color: var(--muted); font-size: 12px; }
+  .hkres { font-size: 12.5px; margin: 4px 0 8px; padding: 6px 10px; border-radius: 7px; }
+  .hkres.pending { background: var(--chip); color: var(--muted); }
+  .hkres.safe { background: rgba(63,185,80,.14); color: var(--live); }
+  .hkres.wip { background: rgba(248,81,73,.14); color: #f85149; }
   .chat {
     width: min(560px, 100%); background: var(--bg); border-left: 1px solid var(--border);
     display: flex; flex-direction: column; height: 100%;
@@ -194,6 +221,7 @@
     </select>
   </label>
   <span id="lights" class="lights"></span>
+  <button id="wrapup">🧹 Wrap-up</button>
   <button id="refresh">↻ Refresh</button>
   <span id="status" class="meta"></span>
 </header>
@@ -214,6 +242,20 @@
     </div>
     <div id="chatBody" class="chat-body"></div>
     <div class="chat-compose" id="chatCompose"></div>
+  </div>
+</div>
+
+<div id="hkOverlay" class="overlay center">
+  <div class="hk">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">🧹 Wrap-up — end-of-session housekeeping</div>
+        <div class="csub" id="hkSub">Checking repositories…</div>
+      </div>
+      <button class="ghost" id="hkRefresh" title="Re-scan">↻</button>
+      <button class="chat-close" id="hkClose" title="Close">×</button>
+    </div>
+    <div id="hkBody" class="hk-body"></div>
   </div>
 </div>
 
@@ -255,13 +297,13 @@ function md(src) {
   src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     const i = codeBlocks.length;
     codeBlocks.push(`<pre><code>${esc(code.replace(/\n$/, ''))}</code></pre>`);
-    return ` CB${i} `;
+    return ` CB${i} `;
   });
   // 2. Escape everything else.
   src = esc(src);
   // 3. Attached-image markers -> <img>.
   src = src.replace(/\[Attached image: ([^\]]+)\]/g, (_, p) =>
-    ` IMG${encodeURIComponent(p.split('/').pop())} `);
+    ` IMG${encodeURIComponent(p.split('/').pop())} `);
   // 4. Inline formatting.
   src = src
     .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -278,14 +320,14 @@ function md(src) {
     if (h) { closeList(); html += `<h4>${h[2]}</h4>`; }
     else if (li) { if (!inList) { html += '<ul>'; inList = true; } html += `<li>${li[1]}</li>`; }
     else if (line.trim() === '') { closeList(); }
-    else if (line.startsWith(' CB')) { closeList(); html += line; }
+    else if (line.startsWith(' CB')) { closeList(); html += line; }
     else { closeList(); html += `<div class="ln">${line}</div>`; }
   }
   closeList();
   // 6. Restore code blocks and images.
   html = html
-    .replace(/ CB(\d+) /g, (_, i) => codeBlocks[+i])
-    .replace(/ IMG([^ ]+) /g, (_, n) =>
+    .replace(/ CB(\d+) /g, (_, i) => codeBlocks[+i])
+    .replace(/ IMG([^ ]+) /g, (_, n) =>
       `<a href="/uploads/${n}" target="_blank"><img class="chatimg" src="/uploads/${n}" alt="attachment"></a>`);
   return html;
 }
@@ -340,7 +382,8 @@ function render() {
         ${liveBadge}
         <span class="badge">${p.sessions.length} session${p.sessions.length > 1 ? 's' : ''}</span>
         <span class="project-path">${esc(p.cwd)}</span>
-        <button class="new-btn" data-new="${esc(p.cwd)}">+ New session</button>
+        <button class="new-btn" data-newterm="${esc(p.cwd)}">+ New terminal</button>
+        <button data-newchat="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="Start a headless session in the browser">+ New headless</button>
       </div>
       <div class="sessions">`;
 
@@ -416,7 +459,8 @@ document.getElementById('folders').addEventListener('click', e => {
 document.getElementById('content').addEventListener('click', e => {
   const btn = e.target.closest('button');
   if (btn) {
-    if (btn.dataset.new) openTerminal({ cwd: btn.dataset.new });
+    if (btn.dataset.newterm) openTerminal({ cwd: btn.dataset.newterm });
+    else if (btn.dataset.newchat) openNewChat(btn.dataset.newchat, btn.dataset.newname || btn.dataset.newchat);
     else if (btn.dataset.resume) openTerminal({ cwd: btn.dataset.cwd, sessionId: btn.dataset.resume });
     else if (btn.dataset.copy) {
       const cmd = `cd ${JSON.stringify(btn.dataset.cwd)} && claude --resume ${btn.dataset.copy}`;
@@ -429,7 +473,7 @@ document.getElementById('content').addEventListener('click', e => {
 });
 
 // ---- Chat panel ------------------------------------------------------------
-let chat = { sessionId: null, total: 0, poll: null, running: false, attachments: [] };
+let chat = { sessionId: null, total: 0, poll: null, running: false, attachments: [], cwd: null, isNew: false };
 
 function findSession(id) {
   for (const p of DATA.projects) {
@@ -447,6 +491,8 @@ function openChat(id) {
   chat.total = 0;
   chat.running = false;
   chat.name = s.title;
+  chat.cwd = p.cwd;
+  chat.isNew = false;
   setChatLight(s.status === 'working' ? 'working' : s.status === 'interrupted' ? 'interrupted' : 'waiting',
     s.status === 'working' ? 'Working' : 'Ready');
   document.getElementById('chatTitle').textContent = s.title;
@@ -456,6 +502,31 @@ function openChat(id) {
   renderCompose(p, s);
   document.getElementById('overlay').classList.add('show');
   loadTranscript(true);
+  checkChatStatus();
+  clearInterval(chat.poll);
+  chat.poll = setInterval(pollTick, 2000);
+}
+
+// Start a brand-new session headlessly in a folder — no terminal. We pick the
+// session id up front so the panel attaches immediately; the first send creates
+// it (server uses --session-id), later sends continue it (--resume).
+function openNewChat(cwd, name) {
+  chat.sessionId = (crypto.randomUUID && crypto.randomUUID()) ||
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  chat.total = 0;
+  chat.running = false;
+  chat.cwd = cwd;
+  chat.isNew = true;
+  chat.name = 'New session · ' + name;
+  setChatLight('waiting', 'Ready');
+  document.getElementById('chatTitle').textContent = 'New session';
+  document.getElementById('chatSub').textContent = `${name} · type a message to start`;
+  document.getElementById('chatBody').innerHTML =
+    '<div class="empty">New headless session in this folder.<br>Send a message to begin — no terminal needed.</div>';
+  renderCompose({ liveTerminals: 0 }, null);
+  document.getElementById('overlay').classList.add('show');
   checkChatStatus();
   clearInterval(chat.poll);
   chat.poll = setInterval(pollTick, 2000);
@@ -613,10 +684,11 @@ async function doSend() {
   try {
     const r = await fetch('/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: chat.sessionId, text, images }),
+      body: JSON.stringify({ session: chat.sessionId, text, images, cwd: chat.cwd }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'failed');
+    if (chat.isNew) { chat.isNew = false; load(); } // refresh list so the new session appears
     setTimeout(() => loadTranscript(false), 600);
   } catch (e) {
     toast('Chat failed: ' + e.message, true);
@@ -652,6 +724,7 @@ async function loadTranscript(reset) {
     const body = document.getElementById('chatBody');
     if (reset) body.innerHTML = '';
     if (j.messages.length) {
+      if (after === 0 && body.querySelector('.empty')) body.innerHTML = ''; // clear placeholder
       const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 200;
       body.insertAdjacentHTML('beforeend', j.messages.map(renderMsg).join(''));
       if (reset || nearBottom) body.scrollTop = body.scrollHeight;
@@ -674,7 +747,7 @@ document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('overlay').addEventListener('click', e => {
   if (e.target.id === 'overlay') closeChat();
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeChat(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); } });
 
 async function load() {
   try {
@@ -685,6 +758,154 @@ async function load() {
     document.getElementById('content').innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>';
   }
 }
+
+// --- Housekeeping / Wrap-up --------------------------------------------------
+const VERDICT_LABEL = { clean: 'Safe to close', dirty: 'Unsaved changes', unpushed: 'Unpushed commits', busy: 'Busy — working' };
+let HK = { repos: [] };
+const hkResult = {}; // cwd -> { state, text }  progress/result per repo
+
+function openHousekeeping() {
+  document.getElementById('hkOverlay').classList.add('show');
+  loadHousekeeping();
+}
+function closeHousekeeping() { document.getElementById('hkOverlay').classList.remove('show'); }
+
+async function loadHousekeeping() {
+  const body = document.getElementById('hkBody');
+  body.innerHTML = '<div class="empty">Scanning repositories…</div>';
+  try {
+    const r = await fetch('/api/housekeeping');
+    HK = await r.json();
+    renderHk();
+  } catch (e) { body.innerHTML = '<div class="empty">Failed: ' + esc(e.message) + '</div>'; }
+}
+
+function renderHk() {
+  const d = HK;
+  const counts = { dirty: 0, unpushed: 0, busy: 0, clean: 0 };
+  d.repos.forEach(r => counts[r.verdict]++);
+  document.getElementById('hkSub').textContent =
+    `${counts.clean} safe · ${counts.dirty} unsaved · ${counts.unpushed} unpushed · ${counts.busy} busy`;
+  const wrappable = d.repos.filter(r => r.verdict !== 'busy').length;
+  const body = document.getElementById('hkBody');
+  body.innerHTML =
+    `<div class="hk-bulk">
+       <button class="primary" id="wrapAll" ${wrappable ? '' : 'disabled'}>▶ Wrap up ${wrappable} safe-candidate folder${wrappable !== 1 ? 's' : ''}</button>
+       <span class="hint">enquires each session, saves &amp; pushes, then closes — work-in-progress is left open</span>
+     </div>`
+    + (d.repos.map(repoHtml).join('') || '<div class="empty">No sessions.</div>');
+  body.querySelector('#wrapAll')?.addEventListener('click', wrapAll);
+  body.querySelectorAll('button[data-commit]').forEach(b => b.onclick = () => doCommit(b.dataset.commit, b.dataset.name));
+  body.querySelectorAll('button[data-push]').forEach(b => b.onclick = () => doPush(b.dataset.push));
+  body.querySelectorAll('button[data-assess]').forEach(b => b.onclick = () => doAssess(b.dataset.assess));
+  body.querySelectorAll('button[data-close]').forEach(b => b.onclick = () => doClose(b.dataset.close, b.dataset.name));
+}
+
+function repoHtml(r) {
+  const g = r.git || {};
+  const gitline = !g.isRepo ? 'not a git repo'
+    : `⎇ ${esc(g.branch || '?')}${g.dirty ? ` · ${g.dirty} uncommitted` : ''}${g.ahead ? ` · ${g.ahead} ahead` : ''}${g.behind ? ` · ${g.behind} behind` : ''}${g.hasRemote ? '' : ' · no remote'}`;
+  const files = (g.files && g.files.length) ? `<div class="files">${g.files.map(esc).join('\n')}</div>` : '';
+  const idleSession = r.sessions.find(s => s.status !== 'working');
+  const actions = [];
+  if (r.verdict !== 'busy' && idleSession)
+    actions.push(`<button data-assess="${esc(idleSession.sessionId)}">Enquire (AI)</button>`);
+  if (r.verdict === 'dirty') actions.push(`<button class="primary" data-commit="${esc(r.cwd)}" data-name="${esc(r.name)}">Commit</button>`);
+  if (g.ahead > 0 && g.hasRemote) actions.push(`<button data-push="${esc(r.cwd)}">Push</button>`);
+  if (r.verdict !== 'busy' && r.liveTerminals > 0)
+    actions.push(`<button data-close="${esc(r.sessions[0]?.sessionId || '')}" data-name="${esc(r.name)}">Close terminal${r.liveTerminals > 1 ? 's' : ''}</button>`);
+  const res = hkResult[r.cwd];
+  const resLine = res ? `<div class="hkres ${res.state}">${esc(res.text)}</div>` : '';
+  return `<div class="repo">
+    <div class="repo-head">
+      <span class="vbadge ${r.verdict}">${VERDICT_LABEL[r.verdict]}</span>
+      <span class="repo-name">${esc(r.name)}</span>
+      <span class="repo-path">${esc(r.cwd)}</span>
+    </div>
+    <div class="repo-detail">
+      <div class="gitline">${gitline} · ${r.sessions.length} session${r.sessions.length > 1 ? 's' : ''}${r.liveTerminals ? ` · ${r.liveTerminals} live` : ''}</div>
+      ${files}${resLine}
+      <div class="repo-actions">${actions.join('') || '<span class="hint">nothing to do — safe to close</span>'}</div>
+    </div>
+  </div>`;
+}
+
+function setRes(cwd, state, text) { hkResult[cwd] = { state, text }; renderHk(); }
+
+async function api(path, payload) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || 'failed');
+  return j;
+}
+
+async function doCommit(cwd, name) {
+  const msg = prompt(`Commit message for ${name}:`, 'checkpoint (ClaudeNav wrap-up)');
+  if (msg === null) return;
+  try { await api('/api/commit', { cwd, message: msg }); toast('Committed ' + name); loadHousekeeping(); }
+  catch (e) { toast('Commit failed: ' + e.message, true); }
+}
+async function doPush(cwd) {
+  try { await api('/api/push', { cwd }); toast('Pushed'); loadHousekeeping(); }
+  catch (e) { toast('Push failed: ' + e.message, true); }
+}
+async function doAssess(sessionId) {
+  const repo = HK.repos.find(r => r.sessions.some(s => s.sessionId === sessionId));
+  if (repo) setRes(repo.cwd, 'pending', 'Enquiring…');
+  try {
+    const v = await api('/api/assess', { session: sessionId });
+    if (repo) setRes(repo.cwd, v.safe ? 'safe' : 'wip', (v.safe ? '🟢 Safe — ' : '🔴 WIP — ') + (v.reason || ''));
+  } catch (e) { if (repo) setRes(repo.cwd, 'wip', 'Enquiry failed: ' + e.message); }
+}
+async function doClose(sessionId, name) {
+  if (!confirm(`Close the live terminal(s) for ${name}? The session is saved and can be resumed.`)) return;
+  try { const j = await api('/api/close', { session: sessionId }); toast(`Closed ${j.killed} terminal(s) in ${name}`); setTimeout(loadHousekeeping, 800); }
+  catch (e) { toast('Close failed: ' + e.message, true); }
+}
+
+// The orchestrated command: enquire each candidate, save+push, then exit. WIP stays open.
+async function wrapAll() {
+  const candidates = HK.repos.filter(r => r.verdict !== 'busy');
+  if (!candidates.length) return;
+  if (!confirm(`Wrap up ${candidates.length} folder(s)?\n\nFor each: ask the session if it's safe, commit + push if there are changes, then close its terminal. Anything flagged work-in-progress is left open and untouched.`)) return;
+  const btn = document.getElementById('wrapAll'); if (btn) btn.disabled = true;
+
+  for (const r of candidates) {
+    const idle = r.sessions.find(s => s.status !== 'working');
+    try {
+      // 1. Enquire
+      let verdict = { safe: true, reason: 'no session to ask', commitMessage: '' };
+      if (idle) { setRes(r.cwd, 'pending', 'Enquiring…'); verdict = await api('/api/assess', { session: idle.sessionId }); }
+      if (!verdict.safe) { setRes(r.cwd, 'wip', '🔴 WIP — left open — ' + (verdict.reason || '')); continue; }
+
+      // 2. Update repo
+      const did = [];
+      if (r.git?.isRepo && r.git.dirty > 0) {
+        setRes(r.cwd, 'pending', 'Committing…');
+        await api('/api/commit', { cwd: r.cwd, message: verdict.commitMessage || 'checkpoint (ClaudeNav wrap-up)' });
+        did.push('committed');
+      }
+      if (r.git?.isRepo && r.git.hasRemote) {
+        try { setRes(r.cwd, 'pending', 'Pushing…'); await api('/api/push', { cwd: r.cwd }); did.push('pushed'); } catch {}
+      }
+      // 3. Gracefully exit
+      if (r.liveTerminals > 0 && idle) {
+        setRes(r.cwd, 'pending', 'Closing…');
+        try { await api('/api/close', { session: idle.sessionId }); did.push('closed'); } catch {}
+      }
+      setRes(r.cwd, 'safe', '🟢 Wrapped' + (did.length ? ' — ' + did.join(', ') : ' — nothing to do'));
+    } catch (e) {
+      setRes(r.cwd, 'wip', 'Skipped — ' + e.message);
+    }
+  }
+  toast('Wrap-up complete');
+  setTimeout(loadHousekeeping, 1000);
+}
+
+document.getElementById('wrapup').addEventListener('click', openHousekeeping);
+document.getElementById('hkClose').addEventListener('click', closeHousekeeping);
+document.getElementById('hkRefresh').addEventListener('click', loadHousekeeping);
+document.getElementById('hkOverlay').addEventListener('click', e => { if (e.target.id === 'hkOverlay') closeHousekeeping(); });
 
 document.getElementById('search').addEventListener('input', render);
 document.getElementById('refresh').addEventListener('click', load);

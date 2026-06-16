@@ -55,12 +55,47 @@ even with the tab in the background (it stops flashing when you focus the tab).
 
 - **Resume ▸** — opens a new Terminal (or iTerm) window running
   `claude --resume <session-id>` in that project's directory.
-- **+ New session** — opens a terminal and starts a fresh `claude` in that
-  project directory.
+- **+ New session** — starts a fresh session **headlessly** in that directory
+  and drops you into the in-browser chat (no terminal). The session id is chosen
+  up front, so the first message creates it (`claude --session-id … -p`) and
+  later messages continue it. It shows up in the session list once started.
 - **⧉** — copies the `claude --resume …` command to your clipboard instead of
   opening a window.
 
 Pick **Terminal** or **iTerm** from the dropdown in the header.
+
+## Wrap-up (housekeeping)
+
+The **🧹 Wrap-up** button in the header opens an end-of-session triage across
+every session's working directory. For each repo it runs `git status` and
+ahead/behind and assigns a verdict:
+
+- 🔴 **Busy** — a session there is still working; never wrap a busy one.
+- 🟡 **Unsaved changes** — uncommitted work. **Commit** button (you set the
+  message); commits locally, never auto-pushes.
+- 🔵 **Unpushed commits** — committed but not pushed. **Push** button.
+- 🟢 **Safe to close** — clean (or not a repo); nothing to do.
+
+It's conservative on purpose: anything busy or dirty is flagged, not closed, so
+no work-in-progress is lost. Git writes are limited to directories that belong
+to a known session.
+
+### The wrap command
+
+**▶ Wrap up safe-candidate folders** runs the full flow across every non-busy
+folder:
+
+1. **Enquire** — asks the session itself, headlessly, *"is it safe to wrap?"*
+   (`POST /api/assess`) and gets back `{safe, reason, commitMessage}`.
+2. **Save** — if the verdict is safe and the repo is dirty, commits (using the
+   session's suggested message) and pushes when there's a remote.
+3. **Gracefully exit** — SIGTERMs the live Claude process(es) for that folder
+   (the transcript is already on disk, so the session stays resumable).
+4. **Leave WIP open** — anything the session flags as work-in-progress (or any
+   busy folder) is reported and left completely untouched.
+
+Per-folder buttons do the same steps individually: **Enquire (AI)**,
+**Commit**, **Push**, **Close terminals**. Closing asks for confirmation.
 
 ## Chat with a session from the browser
 

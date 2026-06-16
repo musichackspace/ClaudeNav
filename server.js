@@ -140,11 +140,12 @@ function parseSessionFile(filePath, stat) {
 // Returns { byCwd: Map<cwd, [tty,...]>, ttys: Set<tty> } for running claude CLIs.
 function getLiveTerminals() {
   const byCwd = new Map();
+  const pidsByCwd = new Map();
   const ttys = new Set();
   let psOut = '';
   try {
     psOut = execFileSync('ps', ['-axo', 'pid=,tty=,command='], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
-  } catch { return { byCwd, ttys }; }
+  } catch { return { byCwd, ttys, pidsByCwd }; }
 
   const procs = [];
   for (const line of psOut.split('\n')) {
@@ -167,10 +168,12 @@ function getLiveTerminals() {
       const devTty = '/dev/' + tty;
       if (!byCwd.has(cwd)) byCwd.set(cwd, []);
       byCwd.get(cwd).push(devTty);
+      if (!pidsByCwd.has(cwd)) pidsByCwd.set(cwd, []);
+      pidsByCwd.get(cwd).push(Number(pid));
       ttys.add(devTty);
     } catch { /* process may have exited */ }
   }
-  return { byCwd, ttys };
+  return { byCwd, ttys, pidsByCwd };
 }
 
 // ---------------------------------------------------------------------------
@@ -393,16 +396,18 @@ function saveImage(dataUrl) {
 // the on-disk transcript never has two of *our* writers at once. (A terminal
 // can still write independently; each browser turn re-reads the latest file, so
 // it always continues from the newest state.)
-function chatTurn(sessionId, text, images, cb) {
+function chatTurn(sessionId, text, images, newCwd, cb) {
   if (!/^[\w-]+$/.test(sessionId || '')) return cb(new Error('bad session id'));
   const imgPaths = (Array.isArray(images) ? images : []).map(saveImage).filter(Boolean);
   if ((!text || !text.trim()) && !imgPaths.length) return cb(new Error('empty message'));
 
+  // Existing session: use its recorded cwd. New session (no file yet): use the
+  // cwd the caller passed — drainQueue will create it with --session-id.
   const fp = findSessionFile(sessionId);
-  if (!fp) return cb(new Error('session not found'));
   let cwd = '';
-  try { cwd = parseSessionFile(fp, fs.statSync(fp)).cwd; } catch {}
-  if (!cwd || !fs.existsSync(cwd)) return cb(new Error('session working directory is missing'));
+  if (fp) { try { cwd = parseSessionFile(fp, fs.statSync(fp)).cwd; } catch {} }
+  else { cwd = newCwd || ''; }
+  if (!cwd || !fs.existsSync(cwd)) return cb(new Error('working directory is missing'));
 
   // Reference each image by absolute path; Claude reads it with the Read tool.
   let prompt = (text || '').trim();
@@ -425,7 +430,12 @@ function drainQueue(sessionId) {
   const { text, cwd } = q.shift();
   lastChatError.delete(sessionId);
 
-  const args = ['--resume', sessionId, '-p', text];
+  // First turn of a brand-new session creates it at our chosen id; later turns
+  // (and all turns of existing sessions) continue it.
+  const exists = findSessionFile(sessionId);
+  const args = exists
+    ? ['--resume', sessionId, '-p', text]
+    : ['--session-id', sessionId, '-p', text];
   if (SKIP_PERMS) args.push('--dangerously-skip-permissions');
 
   const child = execFile(CLAUDE_BIN, args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -457,6 +467,142 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// ---------------------------------------------------------------------------
+// Housekeeping — git state per repo + wrap-readiness verdict
+// ---------------------------------------------------------------------------
+
+function git(cwd, args) {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+}
+
+function gitInfo(cwd) {
+  try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') return { isRepo: false }; }
+  catch { return { isRepo: false }; }
+  const info = { isRepo: true, branch: '', dirty: 0, files: [], ahead: 0, behind: 0, hasRemote: false };
+  try { info.branch = git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']); } catch {}
+  try {
+    const lines = git(cwd, ['status', '--porcelain']).split('\n').filter(Boolean);
+    info.dirty = lines.length;
+    info.files = lines.slice(0, 50);
+  } catch {}
+  try {
+    const c = git(cwd, ['rev-list', '--left-right', '--count', '@{u}...HEAD']).split(/\s+/).map(Number);
+    info.behind = c[0] || 0; info.ahead = c[1] || 0; info.hasRemote = true;
+  } catch { info.hasRemote = false; }
+  return info;
+}
+
+// Set of working directories that belong to a known session (guards git writes).
+function knownCwds() {
+  return new Set(buildData().projects.map(p => p.cwd).filter(Boolean));
+}
+
+function housekeeping() {
+  const { projects } = buildData();
+  const repos = projects.map(p => {
+    const busy = p.sessions.some(s => s.status === 'working');
+    let gi = { isRepo: false };
+    try { gi = gitInfo(p.cwd); } catch {}
+    let verdict;
+    if (busy) verdict = 'busy';
+    else if (!gi.isRepo) verdict = 'clean';     // nothing to save
+    else if (gi.dirty > 0) verdict = 'dirty';   // uncommitted work
+    else if (gi.ahead > 0) verdict = 'unpushed'; // committed but not pushed
+    else verdict = 'clean';
+    return {
+      cwd: p.cwd,
+      name: p.name,
+      liveTerminals: p.liveTerminals,
+      verdict,
+      git: gi,
+      sessions: p.sessions.map(s => ({ sessionId: s.sessionId, title: s.title, status: s.status })),
+    };
+  });
+  const order = { busy: 0, dirty: 1, unpushed: 2, clean: 3 };
+  repos.sort((a, b) => (order[a.verdict] - order[b.verdict]) || a.name.localeCompare(b.name));
+  return { repos, generatedAt: Date.now() };
+}
+
+function gitCommit(cwd, message, cb) {
+  if (!knownCwds().has(cwd)) return cb(new Error('unknown working directory'));
+  const msg = (message || '').trim() || 'checkpoint (ClaudeNav wrap-up)';
+  try {
+    git(cwd, ['add', '-A']);
+    const out = execFileSync('git', ['-C', cwd, 'commit', '-m', msg], { encoding: 'utf8' });
+    cb(null, { committed: true, output: out.trim().split('\n').slice(-1)[0] });
+  } catch (e) {
+    cb(new Error((e.stderr || e.stdout || e.message || 'commit failed').toString().trim().slice(0, 300)));
+  }
+}
+
+function gitPush(cwd, cb) {
+  if (!knownCwds().has(cwd)) return cb(new Error('unknown working directory'));
+  try {
+    const out = execFileSync('git', ['-C', cwd, 'push'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    cb(null, { pushed: true, output: (out || 'pushed').trim().split('\n').slice(-1)[0] });
+  } catch (e) {
+    cb(new Error((e.stderr || e.stdout || e.message || 'push failed').toString().trim().slice(0, 300)));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wrap-up: AI "is it safe to wrap?" enquiry + graceful exit
+// ---------------------------------------------------------------------------
+
+// Ask the session itself, headlessly, whether it's safe to close. Returns a
+// structured verdict. This adds one turn to the transcript (it's an enquiry).
+function assessSession(sessionId, cb) {
+  if (!/^[\w-]+$/.test(sessionId || '')) return cb(new Error('bad session id'));
+  if (runningChats.has(sessionId)) return cb(new Error('session is busy'));
+  const fp = findSessionFile(sessionId);
+  if (!fp) return cb(new Error('session not found'));
+  let cwd = '';
+  try { cwd = parseSessionFile(fp, fs.statSync(fp)).cwd; } catch {}
+  if (!cwd || !fs.existsSync(cwd)) return cb(new Error('working directory is missing'));
+
+  const prompt = 'WRAP-UP CHECK. Do not modify any files. Assess whether this session is safe to wrap up and close. '
+    + 'Reply with ONLY a single-line JSON object and nothing else: '
+    + '{"safe": true|false, "reason": "<=12 words", "commitMessage": "<concise message for any uncommitted work, else empty>"}. '
+    + 'safe must be false if you are mid-task or have unfinished work in progress.';
+  const args = ['--resume', sessionId, '-p', prompt, '--output-format', 'json'];
+  if (SKIP_PERMS) args.push('--dangerously-skip-permissions');
+
+  const child = execFile(CLAUDE_BIN, args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
+    const e = runningChats.get(sessionId); if (e && e.timer) clearTimeout(e.timer);
+    runningChats.delete(sessionId);
+    if (err && !(e && e.killed)) return cb(new Error('assessment failed'));
+    let verdict;
+    try {
+      const result = (JSON.parse(stdout).result || '').trim();
+      const j = result.match(/\{[\s\S]*\}/);
+      verdict = JSON.parse(j ? j[0] : result);
+    } catch { verdict = { safe: false, reason: 'could not parse assessment', commitMessage: '' }; }
+    cb(null, {
+      safe: !!verdict.safe,
+      reason: String(verdict.reason || '').slice(0, 120),
+      commitMessage: String(verdict.commitMessage || '').slice(0, 200),
+    });
+  });
+  const entry = { child, startedAt: Date.now(), killed: false };
+  entry.timer = setTimeout(() => { entry.killed = true; try { child.kill('SIGTERM'); } catch {} }, TURN_TIMEOUT_MS);
+  runningChats.set(sessionId, entry);
+}
+
+// Gracefully exit the live Claude process(es) in this session's directory.
+// SIGTERM lets Claude Code flush the transcript, so the session stays resumable.
+function closeSession(sessionId, cb) {
+  const fp = findSessionFile(sessionId);
+  if (!fp) return cb(new Error('session not found'));
+  let cwd = '';
+  try { cwd = parseSessionFile(fp, fs.statSync(fp)).cwd; } catch {}
+  const { pidsByCwd } = getLiveTerminals();
+  const pids = pidsByCwd.get(cwd) || [];
+  if (!pids.length) return cb(new Error('no live terminal to close'));
+  let killed = 0;
+  for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); killed++; } catch {} }
+  cb(null, { killed });
+}
 
 // ---------------------------------------------------------------------------
 // HTTP server
@@ -509,7 +655,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/chat' && req.method === 'POST') {
     return readBody(req, (err, body) => {
       if (err) return sendJSON(res, 400, { error: 'bad json' });
-      chatTurn(body.session, body.text, body.images, (e, info) => {
+      chatTurn(body.session, body.text, body.images, body.cwd, (e, info) => {
         if (e) return sendJSON(res, 400, { error: e.message });
         sendJSON(res, 200, { ok: true, ...info });
       });
@@ -526,6 +672,51 @@ const server = http.createServer((req, res) => {
       const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
       res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'max-age=3600' });
       res.end(buf);
+    });
+  }
+
+  if (url.pathname === '/api/housekeeping') {
+    try { return sendJSON(res, 200, housekeeping()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/commit' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      gitCommit(body.cwd, body.message, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/push' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      gitPush(body.cwd, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/assess' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      assessSession(body.session, (e, verdict) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...verdict });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/close' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      closeSession(body.session, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
     });
   }
 
