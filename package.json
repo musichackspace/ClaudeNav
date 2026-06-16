@@ -1,0 +1,10 @@
+{
+  "name": "claudenav",
+  "version": "1.0.0",
+  "description": "A local navigator for your Claude Code sessions — see what every terminal is doing and jump between them.",
+  "bin": { "claudenav": "server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "MIT"
+}
