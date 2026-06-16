@@ -220,6 +220,7 @@
       <option value="iTerm">iTerm</option>
     </select>
   </label>
+  <label class="meta"><input type="checkbox" id="hideIdle" /> Hide idle</label>
   <span id="lights" class="lights"></span>
   <button id="wrapup">🧹 Wrap-up</button>
   <button id="refresh">↻ Refresh</button>
@@ -285,6 +286,8 @@ function fmtTok(n) {
 // Approx Claude context window for the fill bar (200K standard).
 const CTX_WINDOW = 200000;
 const STATUS_LABEL = { working: 'Working', waiting: 'Your turn', interrupted: 'Interrupted', idle: 'Idle' };
+// Hide idle (finished/parked) sessions, remembered across refreshes.
+let hideIdle = localStorage.getItem('cn-hide-idle') === '1';
 function shortModel(m) {
   return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '').replace(/\[1m\]$/, ' 1M');
 }
@@ -368,7 +371,7 @@ function render() {
   let shown = 0;
 
   for (const p of DATA.projects) {
-    const sessions = p.sessions.filter(s => matchesQuery(s, p, q));
+    const sessions = p.sessions.filter(s => matchesQuery(s, p, q) && (!hideIdle || s.status !== 'idle'));
     if (!sessions.length) continue;
     shown += sessions.length;
 
@@ -419,7 +422,10 @@ function render() {
     html += `</div></div>`;
   }
 
-  root.innerHTML = shown ? html : '<div class="empty">No sessions match your search.</div>';
+  const emptyMsg = q
+    ? 'No sessions match your search.'
+    : (hideIdle ? 'No active sessions — idle sessions are hidden.' : 'No sessions.');
+  root.innerHTML = shown ? html : `<div class="empty">${emptyMsg}</div>`;
   document.getElementById('status').textContent =
     `${DATA.projects.length} projects · updated ${new Date(DATA.generatedAt).toLocaleTimeString()}`;
   renderFolders();
@@ -944,6 +950,13 @@ document.getElementById('hkOverlay').addEventListener('click', e => { if (e.targ
 
 document.getElementById('search').addEventListener('input', render);
 document.getElementById('refresh').addEventListener('click', load);
+const hideIdleBox = document.getElementById('hideIdle');
+hideIdleBox.checked = hideIdle;
+hideIdleBox.addEventListener('change', () => {
+  hideIdle = hideIdleBox.checked;
+  localStorage.setItem('cn-hide-idle', hideIdle ? '1' : '0');
+  render();
+});
 setFavicon(LIGHT_COLORS.idle);
 // Auto-refresh every 5s so live terminals stay current.
 timer = setInterval(load, 5000);
