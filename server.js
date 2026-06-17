@@ -364,15 +364,28 @@ function parseTranscript(filePath) {
       const c = m.content;
       let text = '';
       const tools = [];
+      let ask = null;
       if (Array.isArray(c)) {
         for (const p of c) {
           if (!p) continue;
           if (p.type === 'text') text += (text ? '\n' : '') + p.text;
-          else if (p.type === 'tool_use') tools.push(p.name);
+          else if (p.type === 'tool_use') {
+            tools.push(p.name);
+            // Surface the structured choices behind an interactive question so the
+            // browser can render clickable options. Headless turns auto-dismiss the
+            // prompt (the user never sees it), but the questions+options live right
+            // here — the UI turns them into buttons and a click becomes the next
+            // resumed turn. (See README/CLAUDE notes on headless AskUserQuestion.)
+            if (p.name === 'AskUserQuestion' && p.input && Array.isArray(p.input.questions)) {
+              ask = { questions: p.input.questions };
+            }
+          }
         }
       } else if (typeof c === 'string') text = c;
       if (text.trim() || tools.length) {
-        messages.push({ role: 'assistant', text: text.trim(), tools, ts: o.timestamp || null });
+        const msg = { role: 'assistant', text: text.trim(), tools, ts: o.timestamp || null };
+        if (ask) msg.ask = ask;
+        messages.push(msg);
       }
     }
   }

@@ -183,6 +183,29 @@
   .bubble { padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--border); }
   .msg.assistant .bubble { border-color: transparent; padding-left: 0; }
   .tooluse { color: var(--muted); font-size: 12px; font-style: italic; }
+  /* Interactive question card — renders an AskUserQuestion's options as
+     clickable choices so a headless turn's prompt doesn't dead-end. */
+  .askcard { border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; margin-top: 8px; background: var(--panel2); }
+  .askblock { margin-bottom: 12px; }
+  .askblock:last-of-type { margin-bottom: 8px; }
+  .askq { font-weight: 600; margin-bottom: 8px; }
+  .askopts { display: flex; flex-direction: column; gap: 6px; }
+  .askopt {
+    text-align: left; width: 100%; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; color: var(--text); cursor: pointer; font: inherit;
+  }
+  .askopt:hover { border-color: var(--accent); }
+  .askopt.sel { border-color: var(--accent); background: rgba(217,119,87,.14); }
+  .askopt .ol { font-weight: 600; display: block; }
+  .askopt .od { color: var(--muted); font-size: 12px; margin-top: 2px; display: block; }
+  .asksend { margin-top: 2px; }
+  .askdone { color: var(--live); font-size: 12px; margin-top: 8px; }
+  /* Inert = a superseded/answered question: a read-only record, not clickable. */
+  .askcard.inert { opacity: .65; }
+  .askcard.inert .askopt { pointer-events: none; }
+  .askcard.inert .askopt:not(.sel) { opacity: .7; }
+  .askcard.inert .asksend { display: none; }
+  .askcard[data-auto="1"] .asksend { display: none; }
   .chat-compose { border-top: 1px solid var(--border); padding: 12px 14px; }
   .chat-compose textarea {
     width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
@@ -785,6 +808,19 @@ function setStatus(running, queued) {
   }
 }
 
+// Fire one resumed turn. Shared by the compose box and the question-card clicks.
+async function postTurn(text, images) {
+  setStatus(true, 0);
+  const r = await fetch('/api/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: chat.sessionId, text, images: images || [], cwd: chat.cwd }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || 'failed');
+  if (chat.isNew) { chat.isNew = false; load(); } // refresh list so the new session appears
+  setTimeout(() => loadTranscript(false), 600);
+}
+
 async function doSend() {
   const box = document.getElementById('composeBox');
   const text = box.value.trim();
@@ -794,16 +830,8 @@ async function doSend() {
   box.value = '';
   chat.attachments = [];
   renderAttachments();
-  setStatus(true, 0);
   try {
-    const r = await fetch('/api/chat', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: chat.sessionId, text, images, cwd: chat.cwd }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'failed');
-    if (chat.isNew) { chat.isNew = false; load(); } // refresh list so the new session appears
-    setTimeout(() => loadTranscript(false), 600);
+    await postTurn(text, images);
   } catch (e) {
     toast('Chat failed: ' + e.message, true);
     box.value = text; // restore so the message isn't lost
@@ -811,6 +839,48 @@ async function doSend() {
     renderAttachments();
   }
   box.focus();
+}
+
+// The live question is the most recent card with no user reply after it; older
+// cards (or ones already answered) stay inert as a read-only record.
+function refreshAsks() {
+  const body = document.getElementById('chatBody');
+  if (!body) return;
+  const rows = [...body.children];
+  let lastUser = -1;
+  rows.forEach((el, i) => { if (el.classList?.contains('user')) lastUser = i; });
+  let live = null;
+  body.querySelectorAll('.askcard').forEach(card => {
+    card.classList.add('inert');
+    if (card.dataset.answered) return;
+    const idx = rows.indexOf(card.closest('.msg'));
+    if (idx > lastUser) live = card; // latest unanswered wins
+  });
+  if (live) live.classList.remove('inert');
+}
+
+// Compose the answer in Claude's native format and send it as the next turn.
+async function submitAsk(card) {
+  const parts = [];
+  card.querySelectorAll('.askblock').forEach(b => {
+    const q = b.querySelector('.askq')?.textContent || '';
+    const sel = [...b.querySelectorAll('.askopt.sel .ol')].map(e => e.textContent);
+    if (sel.length) parts.push({ q, a: sel.join(', ') });
+  });
+  if (!parts.length) return; // nothing picked yet
+  card.dataset.answered = '1';
+  card.classList.add('inert');
+  const done = card.querySelector('.askdone');
+  if (done) { done.hidden = false; done.textContent = '✓ ' + parts.map(p => p.a).join('  ·  '); }
+  ensureNotifyPermission();
+  try {
+    await postTurn(parts.map(p => `"${p.q}"="${p.a}"`).join(', '), []);
+  } catch (e) {
+    toast('Chat failed: ' + e.message, true);
+    delete card.dataset.answered; // let them try again
+    if (done) done.hidden = true;
+    refreshAsks();
+  }
 }
 
 async function checkChatStatus() {
@@ -853,6 +923,7 @@ async function loadTranscript(reset) {
       if (after === 0 && body.querySelector('.empty')) body.innerHTML = ''; // clear placeholder
       const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 200;
       body.insertAdjacentHTML('beforeend', j.messages.map(renderMsg).join(''));
+      refreshAsks();
       if (reset || nearBottom) pinToBottom(body);
     } else if (reset) {
       body.innerHTML = '<div class="empty">No conversation yet.</div>';
@@ -862,12 +933,55 @@ async function loadTranscript(reset) {
 }
 
 function renderMsg(m) {
-  const tools = m.tools && m.tools.length
-    ? `<div class="tooluse">⚙ ${m.tools.map(esc).join(' · ')}</div>` : '';
+  // The question card replaces the bare "⚙ AskUserQuestion" line.
+  const shown = (m.tools || []).filter(t => t !== 'AskUserQuestion');
+  const tools = shown.length
+    ? `<div class="tooluse">⚙ ${shown.map(esc).join(' · ')}</div>` : '';
   const text = m.text ? `<div class="bubble">${md(m.text)}</div>` : '';
+  const ask = m.ask ? renderAsk(m.ask) : '';
   return `<div class="msg ${m.role}">
-    <div class="who">${m.role === 'user' ? 'You' : 'Claude'}</div>${text}${tools}</div>`;
+    <div class="who">${m.role === 'user' ? 'You' : 'Claude'}</div>${text}${tools}${ask}</div>`;
 }
+
+// Render an AskUserQuestion as a card of clickable options. Starts inert;
+// refreshAsks() activates the latest unanswered one after each render.
+function renderAsk(ask) {
+  const qs = ask.questions || [];
+  const single = qs.length === 1 && !qs[0].multiSelect; // one tap → send
+  const blocks = qs.map(q => {
+    const opts = (q.options || []).map(o =>
+      `<button class="askopt"><span class="ol">${esc(o.label)}</span>${
+        o.description ? `<span class="od">${esc(o.description)}</span>` : ''}</button>`).join('');
+    return `<div class="askblock">
+      <div class="askq">${esc(q.question)}</div>
+      <div class="askopts" data-multi="${q.multiSelect ? 1 : 0}">${opts}</div>
+    </div>`;
+  }).join('');
+  return `<div class="askcard inert" data-auto="${single ? 1 : 0}">${blocks}
+    <button class="asksend">Send answer ▸</button>
+    <div class="askdone" hidden></div></div>`;
+}
+
+// Delegated handler for question-card clicks (cards are re-rendered on every
+// poll, so listen once on the persistent chat body).
+document.getElementById('chatBody').addEventListener('click', ev => {
+  const opt = ev.target.closest('.askopt');
+  if (opt) {
+    const card = opt.closest('.askcard');
+    if (card.classList.contains('inert')) return; // not the live question
+    const group = opt.closest('.askopts');
+    if (group.dataset.multi === '1') {
+      opt.classList.toggle('sel');
+    } else {
+      group.querySelectorAll('.askopt').forEach(b => b.classList.remove('sel'));
+      opt.classList.add('sel');
+    }
+    if (card.dataset.auto === '1') submitAsk(card); // single question → one tap sends
+    return;
+  }
+  const send = ev.target.closest('.asksend');
+  if (send) submitAsk(send.closest('.askcard'));
+});
 
 document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('overlay').addEventListener('click', e => {
