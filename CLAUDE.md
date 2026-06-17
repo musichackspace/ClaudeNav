@@ -48,9 +48,14 @@ under launchd's minimal environment.
 - `GET /api/sessions` — projects + sessions (status, tokens, live flags).
 - `GET /api/transcript?session=<id>&after=<n>` — conversation messages.
 - `POST /api/chat {session, text, images, cwd}` — run a headless turn
-  (`--resume`, or `--session-id` to create a new one). Queued one-at-a-time
-  per session; `cwd` is only used when creating.
-- `GET /api/chat-status?session=<id>` — `{running, queued, error}`.
+  (`--resume`, or `--session-id` to create a new one), via
+  `--output-format stream-json --verbose` so blocks can be previewed live.
+  Queued one-at-a-time per session; `cwd` is only used when creating.
+- `GET /api/chat-status?session=<id>` — `{running, queued, error, partial}`.
+  `partial` is the in-flight assistant output (`{text, tools}`, block-level —
+  the CLI doesn't stream tokens) or `null`.
+- `POST /api/chat-cancel {session}` — SIGTERM the running turn (marked so it
+  isn't logged as an error) and drop anything queued behind it.
 - `POST /api/commit {cwd, message}` / `POST /api/push {cwd}` — git, restricted
   to known-session directories.
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
@@ -98,10 +103,13 @@ under launchd's minimal environment.
       processes in a folder (fine for safe, non-busy folders; confirm in UI).
 - [ ] **Per-row AI deep-check**: `assess` is wired into the wrap panel per
       folder; add an explicit per-session "is this mid-task?" button if wanted.
-- [ ] **Chat optimistic echo**: the user's sent message only appears after the
-      transcript poll (~1–2s); consider echoing it immediately.
-- [ ] **Streaming + stop**: replies arrive in poll-sized chunks, not token by
-      token; there's no cancel button for a running/queued turn.
+- [x] **Chat optimistic echo**: sent messages render immediately (`.optimistic`
+      bubble) and are retracted once the transcript poll confirms them.
+- [x] **Streaming + stop**: turns run with `stream-json`; assistant blocks are
+      previewed live via `chat-status.partial`, and a Stop button cancels the
+      running turn + queue (`/api/chat-cancel`). Note: block-level only — the
+      CLI's `stream-json` doesn't emit token deltas, so a single text block
+      still appears all at once when it completes.
 - [ ] **Bulk commit**: wrap has per-folder commit/push and a "wrap all safe"
       orchestrator, but no standalone "commit all unsaved".
 - [ ] **Cross-platform**: terminal-opening is macOS/AppleScript only; other
