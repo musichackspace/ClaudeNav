@@ -227,6 +227,10 @@
   .askcard.inert .askopt:not(.sel) { opacity: .7; }
   .askcard.inert .asksend { display: none; }
   .askcard[data-auto="1"] .asksend { display: none; }
+  .msg.optimistic .bubble { opacity: .6; }
+  .msg.streaming .bubble { opacity: .9; border-left: 2px solid var(--accent); padding-left: 8px; }
+  .typing { display: inline-block; animation: pulse 1s ease-in-out infinite; }
+  .chat-compose button.stop { background: rgba(248,81,73,.16); color: #f85149; border-color: rgba(248,81,73,.4); font-weight: 600; }
   .chat-compose { border-top: 1px solid var(--border); padding: 12px 14px; }
   .chat-compose textarea {
     width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
@@ -647,7 +651,7 @@ document.getElementById('content').addEventListener('click', e => {
 });
 
 // ---- Chat panel ------------------------------------------------------------
-let chat = { sessionId: null, total: 0, poll: null, running: false, attachments: [], cwd: null, isNew: false };
+let chat = { sessionId: null, total: 0, poll: null, running: false, attachments: [], cwd: null, isNew: false, echoes: 0 };
 
 function findSession(id) {
   for (const p of DATA.projects) {
@@ -664,6 +668,7 @@ function openChat(id) {
   chat.sessionId = id;
   chat.total = 0;
   chat.running = false;
+  chat.echoes = 0;
   chat.name = s.title;
   chat.cwd = s.cwd || p.cwd;
   chat.isNew = false;
@@ -692,6 +697,7 @@ function openNewChat(cwd, name) {
     });
   chat.total = 0;
   chat.running = false;
+  chat.echoes = 0;
   chat.cwd = cwd;
   chat.isNew = true;
   chat.name = 'New session · ' + name;
@@ -808,10 +814,13 @@ function renderCompose(p, s) {
     <div class="row">
       <button id="attachBtn" class="ghost" title="Attach image">📎</button>
       <input id="fileInput" type="file" accept="image/*" multiple hidden>
-      ${liveNote}<span id="working" class="hint"></span><button id="sendBtn">Send ▸</button>
+      ${liveNote}<span id="working" class="hint"></span>
+      <button id="stopBtn" class="ghost stop" title="Stop the running turn and clear the queue" hidden>■ Stop</button>
+      <button id="sendBtn">Send ▸</button>
     </div>`;
   const box = el.querySelector('#composeBox');
   el.querySelector('#sendBtn').onclick = doSend;
+  el.querySelector('#stopBtn').onclick = doStop;
   el.querySelector('#attachBtn').onclick = () => el.querySelector('#fileInput').click();
   el.querySelector('#fileInput').onchange = ev => { addFiles(ev.target.files); ev.target.value = ''; };
   box.addEventListener('keydown', ev => {
@@ -855,6 +864,8 @@ function setStatus(running, queued) {
   if (w) w.textContent = running
     ? '⏳ Claude is working…' + (queued > 0 ? ` (${queued} queued)` : '')
     : '';
+  const stop = document.getElementById('stopBtn');
+  if (stop) stop.hidden = !running;
   if (running) {
     setChatLight('working', queued > 0 ? `Working · ${queued} queued` : 'Working');
     setTabSignal('working');
@@ -887,6 +898,7 @@ async function doSend() {
   box.value = '';
   chat.attachments = [];
   renderAttachments();
+  echoUser(text, images);   // show the message immediately, before the poll catches up
   try {
     await postTurn(text, images);
   } catch (e) {
@@ -894,6 +906,11 @@ async function doSend() {
     box.value = text; // restore so the message isn't lost
     chat.attachments = images;
     renderAttachments();
+    dropLastEcho();   // the send didn't land — take the optimistic bubble back
+    chat.running = false;
+    const w = document.getElementById('working'); if (w) w.textContent = '';
+    const stop = document.getElementById('stopBtn'); if (stop) stop.hidden = true;
+    setChatLight('waiting', 'Ready');
   }
   box.focus();
 }
@@ -940,12 +957,78 @@ async function submitAsk(card) {
   }
 }
 
+// Optimistically render the just-sent user message so it appears instantly.
+// Tagged .optimistic so loadTranscript can retract it once the real one lands.
+function echoUser(text, images) {
+  const body = document.getElementById('chatBody');
+  if (!body) return;
+  const ph = body.querySelector('.empty'); if (ph) ph.remove();
+  const imgs = (images || []).map(src => `<img class="chatimg" src="${src}" alt="attachment">`).join('');
+  body.insertAdjacentHTML('beforeend',
+    `<div class="msg user optimistic"><div class="who">You</div>` +
+    `${text ? `<div class="bubble">${md(text)}</div>` : ''}${imgs}</div>`);
+  chat.echoes = (chat.echoes || 0) + 1;
+  pinToBottom(body);
+}
+function dropLastEcho() {
+  const nodes = document.querySelectorAll('#chatBody .msg.optimistic');
+  if (nodes.length) { nodes[nodes.length - 1].remove(); chat.echoes = Math.max(0, (chat.echoes || 0) - 1); }
+}
+
+// Live, in-flight assistant output (block-level), rebuilt from chat-status each
+// poll. Removed as soon as the finalized message arrives via the transcript.
+function renderStreaming(partial) {
+  const body = document.getElementById('chatBody');
+  if (!body) return;
+  const ph = body.querySelector('.empty'); if (ph) ph.remove();
+  const toolLine = partial.tools && partial.tools.length
+    ? `<div class="tooluse">⚙ ${partial.tools.map(esc).join(' · ')}</div>` : '';
+  const textHtml = partial.text
+    ? `<div class="bubble">${md(partial.text)}</div>`
+    : (toolLine ? '' : `<div class="bubble"><span class="typing">▍</span></div>`);
+  const inner = `<div class="who">Claude</div>${textHtml}${toolLine}`;
+  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 200;
+  let el = body.querySelector('.msg.streaming');
+  if (!el) {
+    body.insertAdjacentHTML('beforeend', `<div class="msg assistant streaming">${inner}</div>`);
+  } else {
+    el.innerHTML = inner;
+  }
+  if (nearBottom) pinToBottom(body);
+}
+function clearStreaming() {
+  const el = document.querySelector('#chatBody .msg.streaming');
+  if (el) el.remove();
+}
+
+async function doStop() {
+  if (!chat.sessionId) return;
+  try {
+    const r = await fetch('/api/chat-cancel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: chat.sessionId }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    clearStreaming();
+    toast(j.stopped
+      ? 'Stopped' + (j.dropped ? ` · cleared ${j.dropped} queued` : '')
+      : (j.dropped ? `Cleared ${j.dropped} queued` : 'Nothing to stop'));
+    checkChatStatus();
+  } catch (e) { toast('Stop failed: ' + e.message, true); }
+}
+
 async function checkChatStatus() {
   if (!chat.sessionId) return;
   try {
     const r = await fetch(`/api/chat-status?session=${encodeURIComponent(chat.sessionId)}`);
     const j = await r.json();
     setStatus(j.running, j.queued || 0);
+    if (j.running && j.partial && (j.partial.text || (j.partial.tools && j.partial.tools.length))) {
+      renderStreaming(j.partial);
+    } else if (!j.running) {
+      clearStreaming();
+    }
     if (j.error && !j.running) toast('Turn error: ' + j.error, true);
   } catch {}
 }
@@ -979,6 +1062,16 @@ async function loadTranscript(reset) {
     if (j.messages.length) {
       if (after === 0 && body.querySelector('.empty')) body.innerHTML = ''; // clear placeholder
       const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 200;
+      // Retract optimistic echoes now confirmed by the transcript (one per
+      // real user message), and drop the live preview — the finalized
+      // messages below supersede it.
+      const userArrived = j.messages.filter(m => m.role === 'user').length;
+      if (userArrived) {
+        const echoes = body.querySelectorAll('.msg.optimistic');
+        for (let i = 0; i < userArrived && i < echoes.length; i++) echoes[i].remove();
+        chat.echoes = Math.max(0, (chat.echoes || 0) - userArrived);
+      }
+      clearStreaming();
       body.insertAdjacentHTML('beforeend', j.messages.map(renderMsg).join(''));
       refreshAsks();
       if (reset || nearBottom) pinToBottom(body);
