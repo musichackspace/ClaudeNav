@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execFile, execFileSync } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 
 const PORT = Number(process.env.PORT) || 4317;
 const HOST = '127.0.0.1';
@@ -419,9 +419,12 @@ const SKIP_PERMS = process.env.CLAUDE_SAFE !== '1';
 
 const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_TURN_TIMEOUT_MS) || 15 * 60 * 1000;
 
-const runningChats = new Map(); // sessionId -> { child, startedAt, timer }
+const runningChats = new Map(); // sessionId -> { child, startedAt, timer, killed }
 const chatQueues = new Map();   // sessionId -> [text, ...] turns waiting their turn
 const lastChatError = new Map(); // sessionId -> error string
+// Live (in-flight) assistant output for a running turn, surfaced via chat-status
+// so the browser can show progress before the transcript file is finalized.
+const livePartial = new Map();  // sessionId -> { text, tools, updatedAt }
 
 const IMG_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 
@@ -469,6 +472,21 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
   cb(null, { running: true, queued: position });
 }
 
+// Parse one line of `--output-format stream-json` and fold any assistant text /
+// tool-use blocks into the session's live partial. Best-effort: the on-disk
+// transcript remains the source of truth, so a parse miss just dims the preview.
+function ingestStreamLine(sessionId, line) {
+  let o; try { o = JSON.parse(line); } catch { return; }
+  if (o.type !== 'assistant' || !o.message) return;
+  const lp = livePartial.get(sessionId);
+  if (!lp) return;
+  for (const b of (o.message.content || [])) {
+    if (b.type === 'text' && b.text) lp.text = (lp.text + b.text).slice(-8000);
+    else if (b.type === 'tool_use' && b.name) lp.tools.push(b.name);
+  }
+  lp.updatedAt = Date.now();
+}
+
 function drainQueue(sessionId) {
   if (runningChats.has(sessionId)) return;
   const q = chatQueues.get(sessionId);
@@ -477,22 +495,43 @@ function drainQueue(sessionId) {
   lastChatError.delete(sessionId);
 
   // First turn of a brand-new session creates it at our chosen id; later turns
-  // (and all turns of existing sessions) continue it.
+  // (and all turns of existing sessions) continue it. stream-json + --verbose
+  // lets us read assistant blocks as they land (claude still writes the
+  // transcript file regardless of output format).
   const exists = findSessionFile(sessionId);
-  const args = exists
-    ? ['--resume', sessionId, '-p', text]
-    : ['--session-id', sessionId, '-p', text];
+  const base = exists ? ['--resume', sessionId] : ['--session-id', sessionId];
+  const args = [...base, '-p', text, '--output-format', 'stream-json', '--verbose'];
   if (SKIP_PERMS) args.push('--dangerously-skip-permissions');
 
-  const child = execFile(CLAUDE_BIN, args, { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+  const child = spawn(CLAUDE_BIN, args, { cwd });
+  livePartial.set(sessionId, { text: '', tools: [], updatedAt: Date.now() });
+
+  let buf = '';
+  let stderrTail = '';
+  child.stdout.on('data', chunk => {
+    buf += chunk.toString();
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+      if (line.trim()) ingestStreamLine(sessionId, line);
+    }
+    if (buf.length > (1 << 20)) buf = buf.slice(-(1 << 16)); // guard a pathological no-newline line
+  });
+  child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk.toString()).slice(-2000); });
+
+  const finish = (err) => {
     const entry = runningChats.get(sessionId);
-    if (entry && entry.timer) clearTimeout(entry.timer);
+    if (!entry) return;                       // already finalized (close + error both fired)
+    if (entry.timer) clearTimeout(entry.timer);
     runningChats.delete(sessionId);
-    if (err && !(entry && entry.killed)) {
-      lastChatError.set(sessionId, (stderr || err.message || 'turn failed').trim().slice(0, 500));
+    livePartial.delete(sessionId);
+    if (err && !entry.killed) {
+      lastChatError.set(sessionId, (stderrTail || err.message || 'turn failed').trim().slice(0, 500));
     }
     drainQueue(sessionId); // start the next queued turn, if any
-  });
+  };
+  child.on('error', err => finish(err));
+  child.on('close', code => finish(code === 0 ? null : new Error('claude exited with code ' + code)));
 
   const entry = { child, startedAt: Date.now(), killed: false };
   entry.timer = setTimeout(() => {
@@ -501,6 +540,23 @@ function drainQueue(sessionId) {
     try { child.kill('SIGTERM'); } catch {}
   }, TURN_TIMEOUT_MS);
   runningChats.set(sessionId, entry);
+}
+
+// Stop the running turn for a session and discard anything queued behind it.
+function chatCancel(sessionId, cb) {
+  if (!/^[\w-]+$/.test(sessionId || '')) return cb(new Error('bad session id'));
+  const q = chatQueues.get(sessionId);
+  const dropped = q ? q.length : 0;
+  if (q) q.length = 0;
+  const entry = runningChats.get(sessionId);
+  if (!entry && !dropped) return cb(new Error('nothing running to stop'));
+  if (entry) {
+    entry.killed = true;                      // so finish() doesn't log it as an error
+    if (entry.timer) clearTimeout(entry.timer);
+    try { entry.child.kill('SIGTERM'); } catch {}
+  }
+  lastChatError.delete(sessionId);
+  cb(null, { stopped: !!entry, dropped });
 }
 
 // Kill any in-flight headless turns when the server stops.
@@ -1032,10 +1088,22 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/chat-status') {
     const id = url.searchParams.get('session') || '';
     const queued = (chatQueues.get(id) || []).length;
+    const lp = livePartial.get(id);
     return sendJSON(res, 200, {
       running: runningChats.has(id) || queued > 0,
       queued,
       error: lastChatError.get(id) || null,
+      partial: lp ? { text: lp.text, tools: lp.tools } : null,
+    });
+  }
+
+  if (url.pathname === '/api/chat-cancel' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      chatCancel(body.session, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
     });
   }
 
