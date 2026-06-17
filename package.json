@@ -4,7 +4,13 @@
   "description": "A local navigator for your Claude Code sessions — see what every terminal is doing and jump between them.",
   "bin": { "claudenav": "server.js" },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
   },
   "license": "MIT"
 }
