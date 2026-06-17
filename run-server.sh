@@ -14,6 +14,14 @@ while true; do
   code=$?
   echo "=== $(date '+%Y-%m-%d %H:%M:%S') server.js exited (code $code) ===" >> "$LOG"
   [ "$code" -eq 0 ] && break
+  # Code 42 = the server asked to relaunch (in-app update). Restart immediately
+  # and don't count it against the crash cap.
+  if [ "$code" -eq 42 ]; then
+    echo "=== relaunch requested (code 42) — restarting now ===" >> "$LOG"
+    fails=0
+    window_start=$SECONDS
+    continue
+  fi
   # Reset the counter if the last crash was outside the rapid-crash window.
   if [ $(( SECONDS - window_start )) -gt "$WINDOW" ]; then
     fails=0
