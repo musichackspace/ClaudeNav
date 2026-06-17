@@ -452,9 +452,7 @@ function render() {
         ${liveBadge}
         <span class="badge">${p.sessions.length} session${p.sessions.length > 1 ? 's' : ''}</span>
         <span class="project-path">${esc(p.cwd)}</span>
-        <button class="new-btn" data-newterm="${esc(p.cwd)}">+ New terminal</button>
-        <button data-newchat="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="Start a session right here — no terminal window">+ New in browser</button>
-        <button data-newisolated="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="New session in its own git worktree — safe parallel changes">+ New isolated</button>
+        <button class="new-btn" data-newsession="${esc(p.cwd)}" data-newname="${esc(p.name)}" title="New session in its own git worktree — runs in-browser, no terminal">+ New session</button>
         <button data-viz="${esc(p.cwd)}" data-vizname="${esc(p.name)}" title="Visualise this repo's git history">📊 Visualise</button>
       </div>
       <div class="sessions">`;
@@ -482,8 +480,8 @@ function render() {
           <span class="ctxbar"><i style="width:${ctxPct}%"></i></span>
         </div>
         <div class="s-actions">
-          <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(p.cwd)}">Resume ▸</button>
-          <button data-copy="${esc(s.sessionId)}" data-cwd="${esc(p.cwd)}" title="Copy resume command">⧉</button>
+          <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}">Resume ▸</button>
+          <button data-copy="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}" title="Copy resume command">⧉</button>
         </div>
       </div>`;
     }
@@ -555,9 +553,7 @@ document.getElementById('content').addEventListener('click', e => {
       setCollapsed(btn.dataset.collapse, !collapsed.has(btn.dataset.collapse));
       render();
     }
-    else if (btn.dataset.newterm) openTerminal({ cwd: btn.dataset.newterm });
-    else if (btn.dataset.newchat) openNewChat(btn.dataset.newchat, btn.dataset.newname || btn.dataset.newchat);
-    else if (btn.dataset.newisolated) openIsolated(btn.dataset.newisolated, btn.dataset.newname || btn.dataset.newisolated);
+    else if (btn.dataset.newsession) openIsolated(btn.dataset.newsession, btn.dataset.newname || btn.dataset.newsession);
     else if (btn.dataset.resume) openTerminal({ cwd: btn.dataset.cwd, sessionId: btn.dataset.resume });
     else if (btn.dataset.copy) {
       const cmd = `cd ${JSON.stringify(btn.dataset.cwd)} && claude --resume ${btn.dataset.copy}`;
@@ -589,7 +585,7 @@ function openChat(id) {
   chat.total = 0;
   chat.running = false;
   chat.name = s.title;
-  chat.cwd = p.cwd;
+  chat.cwd = s.cwd || p.cwd;
   chat.isNew = false;
   setChatLight(s.status === 'working' ? 'working' : s.status === 'interrupted' ? 'interrupted' : 'waiting',
     s.status === 'working' ? 'Working' : 'Ready');

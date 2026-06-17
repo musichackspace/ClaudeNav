@@ -235,18 +235,24 @@ function buildData() {
       let s;
       try { s = parseSessionFile(fp, st); } catch { continue; }
 
-      const cwd = s.cwd || dir;
-      if (!projects.has(cwd)) {
-        const ttys = liveByCwd.get(cwd) || [];
-        projects.set(cwd, {
-          cwd,
-          name: cwd.split('/').filter(Boolean).slice(-2).join('/') || cwd,
+      const sessionCwd = s.cwd || dir;
+      // Worktree sessions live at <parent>/.claude/worktrees/<leaf>. Fold them
+      // back under their parent project so they appear at the top of that
+      // project's session list rather than as a separate top-level folder.
+      const wt = sessionCwd.match(/^(.*)\/\.claude\/worktrees\/[^/]+$/);
+      const projCwd = wt ? wt[1] : sessionCwd;
+      s.isWorktree = !!wt;
+      if (!projects.has(projCwd)) {
+        const ttys = liveByCwd.get(projCwd) || [];
+        projects.set(projCwd, {
+          cwd: projCwd,
+          name: projCwd.split('/').filter(Boolean).slice(-2).join('/') || projCwd,
           liveTerminals: ttys.length,
           liveTtys: ttys,
           sessions: [],
         });
       }
-      projects.get(cwd).sessions.push(s);
+      projects.get(projCwd).sessions.push(s);
     }
   }
 
