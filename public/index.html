@@ -95,7 +95,28 @@
     display: inline-block; width: 46px; height: 5px; border-radius: 3px;
     background: var(--chip); overflow: hidden; vertical-align: middle; margin-left: 4px;
   }
-  .ctxbar > i { display: block; height: 100%; background: var(--accent); }
+  .ctxbar > i { display: block; height: 100%; background: var(--live); }
+  .ctxbar.warn > i { background: #e3b341; }
+  .ctxbar.hot > i { background: #f85149; }
+  .s-meta.warn .tok:last-of-type { color: #e3b341; }
+  .s-meta.hot .tok:last-of-type { color: #f85149; }
+  .freshhint {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
+    font-size: 11px; padding: 2px 8px; border-radius: 99px; cursor: pointer;
+    background: rgba(248,81,73,.14); color: #f85149; border: 1px solid rgba(248,81,73,.3);
+  }
+  .freshhint.warn { background: rgba(227,179,65,.14); color: #e3b341; border-color: rgba(227,179,65,.3); }
+  .freshhint:hover { filter: brightness(1.25); }
+  .update-btn {
+    background: var(--accent); color: #1a1d23; border-color: var(--accent); font-weight: 600;
+  }
+  .update-btn:hover { filter: brightness(1.1); border-color: var(--accent); }
+  .update-btn.stale { background: rgba(227,179,65,.18); color: #e3b341; border-color: rgba(227,179,65,.4); }
+  .update-btn[disabled] { opacity: .6; cursor: default; }
+  .stale-note {
+    color: var(--muted); font-size: 12px; text-align: center; padding: 16px 20px 24px;
+  }
+  .stale-note a { color: var(--accent); cursor: pointer; text-decoration: underline; }
   .s-actions { display: flex; gap: 6px; flex: none; }
   .s-actions button { padding: 6px 10px; font-size: 12px; }
   .new-btn { margin-left: auto; }
@@ -285,7 +306,9 @@
     </select>
   </label>
   <label class="meta"><input type="checkbox" id="hideIdle" /> Hide idle</label>
+  <label class="meta" title="Idle sessions untouched for 7+ days are hidden by default; tick to show them. They stay searchable regardless."><input type="checkbox" id="showStale" /> Show older</label>
   <span id="lights" class="lights"></span>
+  <button id="updateBtn" class="update-btn" hidden></button>
   <button id="wrapup">🧹 Wrap-up</button>
   <button id="refresh">↻ Refresh</button>
   <span id="status" class="meta"></span>
@@ -376,6 +399,13 @@ const CTX_WINDOW = 200000;
 const STATUS_LABEL = { working: 'Working', waiting: 'Your turn', interrupted: 'Interrupted', idle: 'Idle' };
 // Hide idle (finished/parked) sessions, remembered across refreshes.
 let hideIdle = localStorage.getItem('cn-hide-idle') === '1';
+// By default, collapse idle sessions untouched for 7+ days out of the main list
+// (they stay searchable). "Show older" reveals them; remembered across refreshes.
+let showStale = localStorage.getItem('cn-show-stale') === '1';
+const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+function isStale(s) { return s.status === 'idle' && (Date.now() - (s.mtimeMs || 0)) > STALE_MS; }
+// Context-fill thresholds (% of the model's window) that prompt token-hygiene UX.
+const CTX_WARN = 60, CTX_HOT = 85;
 function shortModel(m) {
   return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '').replace(/\[1m\]$/, ' 1M');
 }
@@ -455,11 +485,20 @@ function matchesQuery(s, p, q) {
 function render() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const root = document.getElementById('content');
+  const searching = q.length > 0;
   let html = '';
   let shown = 0;
+  let hiddenStale = 0;
 
   for (const p of DATA.projects) {
-    const sessions = p.sessions.filter(s => matchesQuery(s, p, q) && (!hideIdle || s.status !== 'idle'));
+    const sessions = p.sessions.filter(s => {
+      if (!matchesQuery(s, p, q)) return false;
+      if (hideIdle && s.status === 'idle') return false;
+      // Old idle sessions are collapsed out of the default view but stay
+      // searchable — a search query overrides the age cutoff.
+      if (!searching && !showStale && isStale(s)) { hiddenStale++; return false; }
+      return true;
+    });
     if (!sessions.length) continue;
     shown += sessions.length;
 
@@ -484,23 +523,32 @@ function render() {
       const t = s.tokens || {};
       const win = (s.contextTokens || 0) > 200000 ? 1000000 : CTX_WINDOW;
       const ctxPct = Math.min(100, Math.round((s.contextTokens || 0) / win * 100));
+      const tier = ctxPct >= CTX_HOT ? 'hot' : ctxPct >= CTX_WARN ? 'warn' : '';
       const model = s.models && s.models.length ? shortModel(s.models[s.models.length - 1]) : '';
       const tokTip =
         `output ${fmtTok(t.output)} · billed input ${fmtTok((t.input||0)+(t.cacheCreation||0))} · ` +
         `cache read ${fmtTok(t.cacheRead)} · context ${fmtTok(s.contextTokens)} (${ctxPct}% of ${win === CTX_WINDOW ? '200K' : '1M'})` +
         (model ? ` · ${esc(model)}` : '');
+      // Token hygiene: a context-heavy session re-sends its whole history every
+      // turn (slower, pricier, more drift). Nudge toward a fresh worktree session.
+      const hint = tier && s.status !== 'working'
+        ? `<div class="freshhint ${tier}" data-fresh="${esc(p.cwd)}" data-freshname="${esc(p.name)}"
+             title="This session's context is ${ctxPct}% full. Each new turn re-sends the whole history — costlier and the model drifts. Start a clean session for new work; resume this one only to finish its current thread.">
+             ${tier === 'hot' ? '⚠ Context heavy' : '◐ Context filling'} — start fresh ▸</div>`
+        : '';
       html += `<div class="session" data-session="${esc(s.sessionId)}" title="Click to view conversation">
         <span class="light ${s.status}" title="${STATUS_LABEL[s.status] || s.status}"></span>
         <span class="pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
         <div class="s-main">
           <div class="s-title">${esc(s.title)}</div>
           <div class="s-sub">${s.gitBranch ? '⎇ ' + esc(s.gitBranch) + ' · ' : ''}${esc(s.lastPrompt) || '<em>no prompt</em>'}</div>
+          ${hint}
         </div>
-        <div class="s-meta" title="${tokTip}">
+        <div class="s-meta ${tier}" title="${tokTip}">
           ${timeAgo(s.mtimeMs)} · ${s.userMsgCount} msgs<br>
           <span class="tok">↓${fmtTok(t.output)} out</span> ·
           <span class="tok">${fmtTok(s.contextTokens)} ctx</span>
-          <span class="ctxbar"><i style="width:${ctxPct}%"></i></span>
+          <span class="ctxbar ${tier}"><i style="width:${ctxPct}%"></i></span>
         </div>
         <div class="s-actions">
           <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}">Resume ▸</button>
@@ -511,9 +559,15 @@ function render() {
     html += `</div></div>`;
   }
 
+  if (hiddenStale) {
+    html += `<div class="stale-note">${hiddenStale} idle session${hiddenStale > 1 ? 's' : ''} untouched for 7+ days hidden — <a id="revealStale">show older</a> or search to find ${hiddenStale > 1 ? 'them' : 'it'}.</div>`;
+  }
+
   const emptyMsg = q
     ? 'No sessions match your search.'
-    : (hideIdle ? 'No active sessions — idle sessions are hidden.' : 'No sessions.');
+    : hiddenStale
+      ? `No active sessions — ${hiddenStale} older idle session${hiddenStale > 1 ? 's are' : ' is'} hidden. <a id="revealStale">Show older</a> or search.`
+      : (hideIdle ? 'No active sessions — idle sessions are hidden.' : 'No sessions.');
   root.innerHTML = shown ? html : `<div class="empty">${emptyMsg}</div>`;
   document.getElementById('status').textContent =
     `${DATA.projects.length} projects · updated ${new Date(DATA.generatedAt).toLocaleTimeString()}`;
@@ -570,6 +624,9 @@ document.getElementById('folders').addEventListener('click', e => {
 });
 
 document.getElementById('content').addEventListener('click', e => {
+  if (e.target.id === 'revealStale') { setShowStale(true); return; }
+  const fresh = e.target.closest('.freshhint');
+  if (fresh) { openIsolated(fresh.dataset.fresh, fresh.dataset.freshname || fresh.dataset.fresh); return; }
   const btn = e.target.closest('button');
   if (btn) {
     if (btn.dataset.collapse !== undefined) {
@@ -1095,9 +1152,79 @@ async function load() {
     const r = await fetch('/api/sessions');
     DATA = await r.json();
     render();
+    handleVersion(DATA.version);
   } catch (e) {
     document.getElementById('content').innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>';
   }
+}
+
+// --- In-app update / relaunch ------------------------------------------------
+// firstVersion = what the server reported when this tab loaded. We compare every
+// poll against it to spot a restarted backend, new on-disk code, or upstream commits.
+let firstVersion = null;
+let updateState = null; // 'reload' | 'relaunch' | 'update' | null
+function handleVersion(v) {
+  if (!v) return;
+  if (!firstVersion) { firstVersion = v; }
+  const btn = document.getElementById('updateBtn');
+  let state = null, label = '', title = '', stale = false;
+  if (v.bootId !== firstVersion.bootId) {
+    // Backend restarted under us — the served page may be stale. Just reload.
+    state = 'reload'; label = '↻ Update ready — reload';
+    title = 'ClaudeNav restarted with new code. Reload to pick it up.';
+  } else if (v.head && v.bootHead && v.head !== v.bootHead) {
+    // Code on disk changed but this process is still running the old commit.
+    state = 'relaunch'; label = '⟳ New code — relaunch'; stale = true;
+    title = `Disk is at ${v.head} but the server is still running ${v.bootHead}. Relaunch to apply.`;
+  } else if (v.hasRemote && v.behind > 0) {
+    state = 'update';
+    if (v.dirty > 0) {
+      label = `⬆ ${v.behind} update${v.behind > 1 ? 's' : ''} available`; stale = true;
+      title = `origin is ${v.behind} commit(s) ahead, but the working tree has ${v.dirty} uncommitted change(s) — a fast-forward update may fail.`;
+    } else {
+      label = `⬆ Update & relaunch (${v.behind})`;
+      title = `Pull ${v.behind} new commit(s) from origin and relaunch the server.`;
+    }
+  }
+  updateState = state;
+  if (!state) { btn.hidden = true; return; }
+  if (btn.disabled) return; // a relaunch is already in flight — don't stomp the label
+  btn.hidden = false;
+  btn.textContent = label;
+  btn.title = title;
+  btn.classList.toggle('stale', stale);
+}
+
+async function doUpdate() {
+  const btn = document.getElementById('updateBtn');
+  if (updateState === 'reload') { location.reload(); return; }
+  const pull = updateState === 'update';
+  btn.disabled = true;
+  btn.textContent = pull ? 'Updating…' : 'Relaunching…';
+  try {
+    const r = await fetch('/api/update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pull }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'update failed');
+  } catch (e) {
+    toast('Update failed: ' + e.message, true);
+    btn.disabled = false; handleVersion(DATA.version);
+    return;
+  }
+  // Server is exiting; run-server.sh relaunches it. Poll until a new bootId, then reload.
+  toast('Restarting ClaudeNav…');
+  const oldBoot = firstVersion ? firstVersion.bootId : null;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(res => setTimeout(res, 500));
+    try {
+      const v = await (await fetch('/api/version')).json();
+      if (v.bootId && v.bootId !== oldBoot) { location.reload(); return; }
+    } catch { /* server still down between exit and relaunch */ }
+  }
+  toast('Server is taking a while — reload manually when it’s back.', true);
+  btn.disabled = false;
 }
 
 // --- Housekeeping / Wrap-up --------------------------------------------------
@@ -1269,6 +1396,7 @@ document.getElementById('vizOverlay').addEventListener('click', e => { if (e.tar
 
 document.getElementById('search').addEventListener('input', render);
 document.getElementById('refresh').addEventListener('click', load);
+document.getElementById('updateBtn').addEventListener('click', doUpdate);
 const hideIdleBox = document.getElementById('hideIdle');
 hideIdleBox.checked = hideIdle;
 hideIdleBox.addEventListener('change', () => {
@@ -1276,6 +1404,15 @@ hideIdleBox.addEventListener('change', () => {
   localStorage.setItem('cn-hide-idle', hideIdle ? '1' : '0');
   render();
 });
+const showStaleBox = document.getElementById('showStale');
+function setShowStale(v) {
+  showStale = v;
+  showStaleBox.checked = v;
+  localStorage.setItem('cn-show-stale', v ? '1' : '0');
+  render();
+}
+showStaleBox.checked = showStale;
+showStaleBox.addEventListener('change', () => setShowStale(showStaleBox.checked));
 setFavicon(LIGHT_COLORS.idle);
 // Auto-refresh every 5s so live terminals stay current.
 timer = setInterval(load, 5000);

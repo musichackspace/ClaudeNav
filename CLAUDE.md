@@ -59,6 +59,13 @@ under launchd's minimal environment.
   session's cwd (graceful; transcript persists, resumable).
 - `POST /api/open` — open Terminal/iTerm (resume or new). `/uploads/<name>` —
   serves pasted images.
+- `GET /api/version` — `{bootId, bootHead, head, branch, dirty, behind, hasRemote,
+  canUpdate}`. `bootId`/`bootHead` describe the running process; `head`/`behind`
+  reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
+  to `/api/sessions` as `version`, so the 5s poll surfaces updates for free.
+- `POST /api/update {pull}` — `git pull --ff-only` (when `pull`) then relaunch via
+  `process.exit(42)`; `run-server.sh` treats 42 as an intentional restart (no
+  crash-cap hit). Powers the header "Update & relaunch" button.
 
 ## Conventions / gotchas
 

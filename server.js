@@ -535,6 +535,72 @@ function git(cwd, args) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
 }
 
+// ---------------------------------------------------------------------------
+// Self-version + update/relaunch — lets the browser notice new code and apply it
+// ---------------------------------------------------------------------------
+
+const REPO_DIR = __dirname;            // server.js lives at the repo root
+const BOOT_ID = Date.now();            // unique per process — changes on restart
+function gitRepo(args) { try { return git(REPO_DIR, args); } catch { return ''; } }
+const BOOT_HEAD = gitRepo(['rev-parse', '--short', 'HEAD']);  // code this process started on
+
+// `git fetch` is networked and can stall, so we run it in the background at most
+// once per TTL and serve the last-known "commits behind" count to callers.
+let fetchState = { at: 0, running: false, behind: 0 };
+const FETCH_TTL = 5 * 60 * 1000;
+function maybeFetch() {
+  const now = Date.now();
+  if (fetchState.running || (fetchState.at && now - fetchState.at < FETCH_TTL)) return;
+  if (!BOOT_HEAD) return;                                 // not a git checkout
+  fetchState.running = true;
+  execFile('git', ['-C', REPO_DIR, 'fetch', '--quiet'], { timeout: 20000 }, () => {
+    fetchState.running = false;
+    fetchState.at = Date.now();
+    fetchState.behind = Number(gitRepo(['rev-list', '--count', 'HEAD..@{u}'])) || 0;
+  });
+}
+
+// What the running process is, what's on disk now, and what's upstream.
+function versionInfo() {
+  maybeFetch();
+  const head = gitRepo(['rev-parse', '--short', 'HEAD']) || BOOT_HEAD;
+  const branch = gitRepo(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const dirty = gitRepo(['status', '--porcelain']).split('\n').filter(Boolean).length;
+  const hasRemote = !!gitRepo(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  return {
+    bootId: BOOT_ID,        // changes when the server restarts
+    bootHead: BOOT_HEAD,    // commit the process is running
+    head,                   // commit currently checked out on disk
+    branch,
+    dirty,
+    behind: fetchState.behind,
+    hasRemote,
+    // Safe to fast-forward only when clean and actually behind.
+    canUpdate: hasRemote && fetchState.behind > 0 && dirty === 0,
+  };
+}
+
+// Pull (optional) then ask run-server.sh to relaunch us via the dedicated exit
+// code 42. Responds first, then exits a beat later so the HTTP reply lands.
+function selfUpdate({ pull }, cb) {
+  if (!BOOT_HEAD) return cb(new Error('not a git checkout — cannot self-update'));
+  if (pull) {
+    try { git(REPO_DIR, ['pull', '--ff-only']); }
+    catch (e) {
+      const msg = (e.stderr || e.stdout || e.message || '').toString().trim().slice(0, 300);
+      return cb(new Error('git pull --ff-only failed: ' + (msg || 'unknown error')));
+    }
+  }
+  cb(null, { relaunching: true, head: gitRepo(['rev-parse', '--short', 'HEAD']) });
+  setTimeout(() => {
+    for (const { child, timer } of runningChats.values()) {
+      if (timer) clearTimeout(timer);
+      try { child.kill('SIGTERM'); } catch {}
+    }
+    process.exit(42); // run-server.sh treats 42 as "relaunch now"
+  }, 300);
+}
+
 function gitInfo(cwd) {
   try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') return { isRepo: false }; }
   catch { return { isRepo: false }; }
@@ -848,8 +914,27 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
 
   if (url.pathname === '/api/sessions') {
-    try { return sendJSON(res, 200, buildData()); }
+    try {
+      const data = buildData();
+      try { data.version = versionInfo(); } catch {}
+      return sendJSON(res, 200, data);
+    }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/version') {
+    try { return sendJSON(res, 200, versionInfo()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/update' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      selfUpdate({ pull: body.pull !== false }, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
   }
 
   if (url.pathname === '/api/transcript') {
