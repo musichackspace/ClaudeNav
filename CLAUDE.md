@@ -105,6 +105,16 @@ under launchd's minimal environment.
   sessions when testing.
 - `pkill -f "server.js"` is too broad (matches any `server.js`, e.g. editor
   helpers). Target the port or exact path instead.
+- **Headless `AskUserQuestion`**: a `-p` turn can't pause for input — the tool
+  returns `is_error: "Answer questions?"` and the model barrels ahead on an
+  assumption. So `ingestStreamLine` SIGTERMs the turn the instant an
+  `AskUserQuestion` tool_use streams in (`pauseForQuestion`). Claude Code still
+  flushes the auto-dismiss tool_result before exiting, so the transcript holds a
+  clean tool_use+tool_result pair (no dangling tool → resume is clean) and the
+  question is its terminal block. The UI renders the clickable card from the
+  transcript only (not the live partial — that raced the poll); a click resumes
+  the session with `"<question>"="<answer>"`. Verified end-to-end: resume after a
+  mid-question kill returns rc=0 and Claude acts on the pick.
 
 ## Outstanding / TODO
 
