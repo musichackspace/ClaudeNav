@@ -208,6 +208,11 @@
   #chatLightLabel { font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); white-space: nowrap; }
   .chat-head .ctitle { font-weight: 600; }
   .chat-head .csub { color: var(--muted); font-size: 12px; }
+  .mode-pick { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); white-space: nowrap; }
+  .mode-pick select { font-size: 12px; text-transform: none; letter-spacing: 0; background: var(--panel2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; cursor: pointer; }
+  .mode-pick select.plan { border-color: #58a6ff; color: #58a6ff; }
+  .mode-badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .mode-badge.plan { border-color: #58a6ff; color: #58a6ff; }
   .chat-close { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; padding: 0 4px; }
   .chat-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px; }
   .msg { margin-bottom: 14px; }
@@ -371,6 +376,10 @@
         <div id="chatTitle" class="ctitle"></div>
         <div id="chatSub" class="csub"></div>
       </div>
+      <label class="mode-pick" title="Permission mode for the next message sent from ClaudeNav. Plan = read-only, Claude proposes a plan without making changes.">
+        mode
+        <select id="chatMode"></select>
+      </label>
       <button class="chat-close" id="chatClose" title="Close">×</button>
     </div>
     <div id="chatBody" class="chat-body"></div>
@@ -442,6 +451,11 @@ function fmtTok(n) {
 // Approx Claude context window for the fill bar (200K standard).
 const CTX_WINDOW = 200000;
 const STATUS_LABEL = { working: 'Working', waiting: 'Your turn', interrupted: 'Interrupted', idle: 'Idle' };
+// Permission modes (mirrors the CLI's --permission-mode choices). Shown per
+// session and changeable from the chat header; 'plan' is the read-only one.
+const MODE_LABEL = { default: 'Default', plan: 'Plan', acceptEdits: 'Accept edits', auto: 'Auto', bypassPermissions: 'Bypass', dontAsk: "Don't ask" };
+const MODE_CHOICES = ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'];
+function modeOf(s) { return (s && s.mode) || 'bypassPermissions'; }
 // Hide idle (finished/parked) sessions, remembered across refreshes.
 let hideIdle = localStorage.getItem('cn-hide-idle') === '1';
 // By default, collapse idle sessions untouched for 7+ days out of the main list
@@ -592,7 +606,7 @@ function render() {
         <span class="light ${s.status}" title="${STATUS_LABEL[s.status] || s.status}"></span>
         <span class="pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
         <div class="s-main">
-          <div class="s-title">${esc(s.title)}</div>
+          <div class="s-title">${esc(s.title)} <span class="mode-badge ${modeOf(s) === 'plan' ? 'plan' : ''}" title="Permission mode for the next ClaudeNav turn${s.modeOverride ? ' (pinned)' : ''}">${esc(MODE_LABEL[modeOf(s)] || modeOf(s))}</span></div>
           <div class="s-sub">${s.gitBranch ? '⎇ ' + esc(s.gitBranch) + ' · ' : ''}${esc(s.lastPrompt) || '<em>no prompt</em>'}</div>
           ${hint}
         </div>
@@ -728,6 +742,37 @@ function jumpToHashSession() {
 }
 window.addEventListener('hashchange', jumpToHashSession);
 
+// Populate the chat-head permission-mode selector for the open session and
+// wire its change handler. `current` is the effective mode to preselect.
+function setupModeSelect(current) {
+  const sel = document.getElementById('chatMode');
+  if (!sel) return;
+  const cur = current || 'bypassPermissions';
+  sel.innerHTML = MODE_CHOICES.map(m =>
+    `<option value="${m}"${m === cur ? ' selected' : ''}>${MODE_LABEL[m]}</option>`).join('');
+  sel.className = cur === 'plan' ? 'plan' : '';
+  sel.onchange = () => changeSessionMode(sel.value);
+}
+
+async function changeSessionMode(mode) {
+  const id = chat.sessionId;
+  if (!id) return;
+  const sel = document.getElementById('chatMode');
+  if (sel) sel.className = mode === 'plan' ? 'plan' : '';
+  try {
+    const r = await fetch('/api/session-mode', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: id, mode }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    // Reflect immediately in the cached session so the row badge updates.
+    const found = findSession(id);
+    if (found) { found.s.mode = mode; found.s.modeOverride = mode; }
+    toast('Mode → ' + (MODE_LABEL[mode] || mode));
+  } catch (e) { toast('Could not set mode: ' + e.message, true); }
+}
+
 function openChat(id) {
   const found = findSession(id);
   if (!found) return;
@@ -745,6 +790,7 @@ function openChat(id) {
   document.getElementById('chatSub').textContent =
     `${p.name} · ${STATUS_LABEL[s.status] || s.status}` + (s.gitBranch ? ` · ⎇ ${s.gitBranch}` : '');
   document.getElementById('chatBody').innerHTML = '<div class="empty">Loading conversation…</div>';
+  setupModeSelect(modeOf(s));
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
   renderCompose(p, s); // after .show so box.focus() lands on a visible element
@@ -773,6 +819,7 @@ function openNewChat(cwd, name) {
   document.getElementById('chatSub').textContent = `${name} · type a message to start`;
   document.getElementById('chatBody').innerHTML =
     '<div class="empty">New headless session in this folder.<br>Send a message to begin — no terminal needed.</div>';
+  setupModeSelect('bypassPermissions');
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
   renderCompose({ liveTerminals: 0 }, null); // after .show so box.focus() lands on a visible element
