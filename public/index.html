@@ -476,7 +476,10 @@ function isStale(s) {
   return (s.status === 'idle' || s.status === 'waiting')
     && (Date.now() - (s.mtimeMs || 0)) > STALE_MS;
 }
-// Context-fill thresholds (% of the model's window) that prompt token-hygiene UX.
+// Context-fill thresholds (% of the session's real window) that prompt
+// token-hygiene UX. The window comes from the server (`s.contextWindow`): it's
+// proven 1M when any turn exceeded 200K, else the repo's configured default
+// model variant — so the % reflects true headroom-to-the-wall, not a guess.
 const CTX_WARN = 60, CTX_HOT = 85;
 function shortModel(m) {
   return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '').replace(/\[1m\]$/, ' 1M');
@@ -593,8 +596,9 @@ function render() {
 
     for (const s of sessions) {
       const t = s.tokens || {};
-      const win = (s.contextTokens || 0) > 200000 ? 1000000 : CTX_WINDOW;
-      const ctxPct = Math.min(100, Math.round((s.contextTokens || 0) / win * 100));
+      const ctxTok = s.contextTokens || 0;
+      const win = s.contextWindow || ((ctxTok > 200000) ? 1000000 : CTX_WINDOW);
+      const ctxPct = Math.min(100, Math.round(ctxTok / win * 100));
       const tier = ctxPct >= CTX_HOT ? 'hot' : ctxPct >= CTX_WARN ? 'warn' : '';
       const model = s.models && s.models.length ? shortModel(s.models[s.models.length - 1]) : '';
       const tokTip =
@@ -607,7 +611,7 @@ function render() {
       // ("+ New session" stays separate: that's a blank session for unrelated work.)
       const hint = tier && s.status !== 'working'
         ? `<div class="freshhint ${tier}"
-             title="This session's context is ${ctxPct}% full. Each new turn re-sends the whole history — costlier, and the model drifts.">
+             title="This session is ${ctxPct}% of its ${win === CTX_WINDOW ? '200K' : '1M'} window (~${fmtTok(ctxTok)}), re-sent every turn — costlier, and the model drifts.">
              <span>${tier === 'hot' ? '⚠ Context heavy' : '◐ Context filling'} (${ctxPct}%)</span>
              <button class="hintbtn" data-compact="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}"
                title="Compact in place: summarises old history within THIS session, keeping the same thread. Frees context, no new session.">Compact</button>
