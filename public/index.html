@@ -49,6 +49,7 @@
   .usage .u-fill.warn { background: #e3b341; }
   .usage .u-fill.bad { background: #f85149; }
   .usage .u-pct { color: var(--text); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
+  .usage .u-reset { color: var(--muted); font-variant-numeric: tabular-nums; opacity: .8; }
   main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   .project {
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
@@ -1464,6 +1465,19 @@ function fmtReset(iso) {
   if (hrs < 24) return `resets in ${hrs} hr${rem ? ' ' + rem + ' min' : ''}`;
   return 'resets ' + new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
 }
+// Compact form of the reset countdown for the always-visible chip next to each
+// bar (the full phrasing stays in the hover tooltip).
+function fmtResetShort(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const mins = Math.round((t - Date.now()) / 60000);
+  if (mins <= 0) return 'now';
+  if (mins < 60) return mins + 'm';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + 'h';
+  return Math.round(hrs / 24) + 'd';
+}
 function handleUsage(u) {
   const el = document.getElementById('usage');
   if (!el) return;
@@ -1474,10 +1488,13 @@ function handleUsage(u) {
     const pct = Math.max(0, Math.min(100, b.percent));
     const cls = pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : '';
     const tip = esc(b.label + ' — ' + pct + '% used' + (b.resets_at ? ' · ' + fmtReset(b.resets_at) : ''));
+    const short = fmtResetShort(b.resets_at);
     return `<span class="u" title="${tip}">`
       + `<span class="u-label">${esc(b.label)}</span>`
       + `<span class="u-bar"><span class="u-fill ${cls}" style="width:${pct}%"></span></span>`
-      + `<span class="u-pct">${pct}%</span></span>`;
+      + `<span class="u-pct">${pct}%</span>`
+      + (short ? `<span class="u-reset" aria-label="resets">↻ ${esc(short)}</span>` : '')
+      + `</span>`;
   }).join('');
 }
 
