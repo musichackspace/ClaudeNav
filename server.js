@@ -53,6 +53,7 @@ function parseSessionFile(filePath, stat) {
   let lastStopReason = null; // stop_reason of the most recent assistant turn
   let permissionMode = null; // permission mode the most recent turn ran under
   let lastUserText = null; // text of the most recent user message (for ack detection)
+  let lastAssistantText = null; // text of the most recent assistant message (for "awaiting you?" detection)
 
   const content = fs.readFileSync(filePath, 'utf8');
   for (const line of content.split('\n')) {
@@ -79,18 +80,25 @@ function parseSessionFile(filePath, stat) {
         break;
       case 'user': {
         userMsgCount++;
-        lastEventType = 'user';
         const c = o.message && o.message.content;
         const text = typeof c === 'string'
           ? c
           : Array.isArray(c)
             ? c.filter(p => p && p.type === 'text').map(p => p.text).join(' ')
             : null;
-        if (text && !firstUserPrompt) firstUserPrompt = text.trim();
-        // Track the latest real user message. Skip tool_result-only and
-        // command/meta records (e.g. /compact, hook output) so a genuine reply
-        // is what we test for a sign-off ack later.
-        if (text && text.trim() && !o.isMeta) lastUserText = text.trim();
+        const isToolResult = Array.isArray(c) && c.length
+          && c.every(p => p && p.type === 'tool_result');
+        // Many "user" records aren't a human taking a turn: tool results, hook
+        // output, and slash-command machinery (`<local-command-stdout>Bye!`,
+        // `<task-notification>…`, `<command-name>…`). Counting these as the last
+        // conversational event makes a wrapped session look mid-turn ("you said
+        // bye" → flagged interrupted). Only genuine prose moves the turn pointer.
+        const synthetic = o.isMeta || isToolResult || !text || !text.trim()
+          || /^<\/?(local-command-stdout|local-command-stderr|command-name|command-message|command-args|task-notification|system-reminder|bash-input|bash-stdout|bash-stderr|user-prompt-submit-hook)\b/.test(text.trim());
+        if (synthetic) break;
+        lastEventType = 'user';
+        if (!firstUserPrompt) firstUserPrompt = text.trim();
+        lastUserText = text.trim(); // latest real user message — for the sign-off ack check
         break;
       }
       case 'assistant': {
@@ -98,6 +106,13 @@ function parseSessionFile(filePath, stat) {
         const m = o.message || {};
         if (m.model && m.model !== '<synthetic>') models.add(m.model);
         if (m.stop_reason !== undefined) lastStopReason = m.stop_reason;
+        // Keep the text of the latest assistant message that actually said
+        // something (tool-only turns carry no text) — used to tell "I'm asking
+        // you something" apart from "work delivered, nothing pending".
+        const at = Array.isArray(m.content)
+          ? m.content.filter(p => p && p.type === 'text').map(p => p.text).join('\n')
+          : (typeof m.content === 'string' ? m.content : '');
+        if (at && at.trim()) lastAssistantText = at.trim();
         const u = m.usage;
         if (u) {
           assistantTurns++;
@@ -132,6 +147,7 @@ function parseSessionFile(filePath, stat) {
     lastStopReason,
     permissionMode,
     lastUserText,
+    lastAssistantText,
     firstTs,
     lastTs,
     mtimeMs: stat.mtimeMs,
@@ -206,19 +222,38 @@ function looksLikeClosingAck(text) {
   return false;
 }
 
+// Does the assistant's final message actually put the ball in your court? An
+// end_turn alone doesn't mean "your turn" — most completed work ends with a
+// statement ("Done.", "Pushed PR #10."), which expects nothing back. We only
+// call it your turn when the closing message asks a question or offers a choice.
+// This is the line between "Your turn" and "idle/done" for a finished turn.
+function awaitsUserReply(text) {
+  if (!text) return false;
+  // Look at the closing thought: the last non-empty line, plus the final
+  // sentence of the whole message (a trailing question can sit on its own line
+  // or end a paragraph).
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const lastLine = lines[lines.length - 1] || '';
+  // Ends on a question mark (ignoring trailing markdown/emoji/closing brackets).
+  const endsQ = /[?？]["'’”)\]*_`~\s]*$/.test(text.trim());
+  const lastLineQ = /[?？]["'’”)\]*_`~\s]*$/.test(lastLine);
+  // Explicit offers / requests for a decision, in the closing line.
+  const offer = /\b(want me to|would you like|do you want|should i\b|shall i\b|shall we|should we|let me know (which|if you|whether)|which (one|option|approach|of these)|ready for me to|do you prefer|which would you)\b/i.test(lastLine);
+  return endsQ || lastLineQ || offer;
+}
+
 // Classify a session's state from its tail records + liveness.
 //   working      — mid-turn and actively producing output: the transcript was
 //                  written to in the last 90s, or the server is running a headless
 //                  turn for it. NOT based on terminal liveness — that's detected
 //                  per-directory and can't tell an exited session from a sibling.
-//   waiting      — "Your turn": the assistant ended its turn (end_turn) and is
-//                  waiting on you, OR a turn was left parked without reaching a
-//                  conclusion. This is independent of how long ago it was: an
-//                  unanswered turn doesn't become "done" just because time passed.
-//   idle         — genuinely concluded: the thread ended on a satisfactory user
-//                  acknowledgement (a sign-off). These are the only ones we treat
-//                  as finished/parked. (Merge/wrap conclusions are surfaced by the
-//                  housekeeping panel, which has the git state this view doesn't.)
+//   waiting      — "Your turn": the assistant genuinely handed a decision back to
+//                  you (its closing message asks a question / offers a choice), or
+//                  a turn was left parked unanswered. Independent of age — an open
+//                  question doesn't answer itself with time.
+//   idle         — done/parked: a finished turn that expects nothing back (work
+//                  delivered, wrap confirmed, a sign-off), or a user sign-off ack.
+//                  Most completed sessions land here.
 //   interrupted  — mid-turn and untouched for 30+ min: genuinely left half-done.
 function computeStatus(s) {
   // A turn this server is running (or has queued) for the session counts as live,
@@ -230,14 +265,13 @@ function computeStatus(s) {
   const recentMs = Date.now() - (s.mtimeMs || 0);
   const activelyWriting = recentMs < 90 * 1000;     // transcript written in last 90s
   const longAbandoned = recentMs > 30 * 60 * 1000;  // mid-turn, untouched 30 min+
-  const ended = s.lastStopReason === 'end_turn';
+  // end_turn / stop_sequence are clean turn endings; tool_use / null mean the turn
+  // was cut off mid-flight (a tool call with no follow-up recorded).
+  const cleanlyEnded = s.lastStopReason === 'end_turn' || s.lastStopReason === 'stop_sequence';
   const lastWasUser = s.lastEventType === 'user';
-  const midTurn = lastWasUser || (s.lastStopReason && !ended);
+  const midTurn = lastWasUser || (s.lastStopReason && !cleanlyEnded);
 
-  // A satisfactory sign-off from the user is the one thing that marks a thread
-  // done. It can land either as the final record (lastWasUser) or right before
-  // the assistant's closing reply — only the user-message case is unambiguous,
-  // so that's all we trust.
+  // A satisfactory sign-off from the user marks a thread done outright.
   if (lastWasUser && looksLikeClosingAck(s.lastUserText)) return 'idle';
 
   if (midTurn) {
@@ -249,13 +283,13 @@ function computeStatus(s) {
     // write is the only trustworthy signal. (serverActive, above, covers headless.)
     if (activelyWriting) return 'working';
     if (longAbandoned) return 'interrupted';  // really left half-done → needs you
-    // Parked mid-turn with no conclusion: the goal wasn't reached, so this still
-    // needs you. Previously this fell through to "idle" and quietly disappeared.
-    return 'waiting';
+    // Parked mid-turn but recent: a turn is probably still resolving, or you just
+    // stepped away. Don't alarm and don't claim it's your turn — it's Claude's.
+    return 'idle';
   }
-  // Assistant ended its turn and is waiting on you. That's your turn no matter how
-  // old it is — it only becomes "idle" once you actually wrap/ack it (above).
-  if (ended) return 'waiting';
+  // Assistant finished cleanly. Your turn ONLY if it actually asked you something;
+  // otherwise the work is delivered and nothing's pending → done.
+  if (cleanlyEnded) return awaitsUserReply(s.lastAssistantText) ? 'waiting' : 'idle';
   return 'idle';
 }
 
