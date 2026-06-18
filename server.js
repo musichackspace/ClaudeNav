@@ -518,9 +518,9 @@ function parseTranscript(filePath) {
             tools.push(tool);
             if (p.id) toolUseById.set(p.id, tool);
             // Surface the structured choices behind an interactive question so the
-            // browser can render clickable options. Headless turns auto-dismiss the
-            // prompt (the user never sees it), but the questions+options live right
-            // here — the UI turns them into buttons and a click becomes the next
+            // browser can render clickable options. The turn was stopped the moment
+            // it asked (see pauseForQuestion), so the question is the terminal block;
+            // the UI turns these options into buttons and a click becomes the next
             // resumed turn. (See README/CLAUDE notes on headless AskUserQuestion.)
             if (p.name === 'AskUserQuestion' && p.input && Array.isArray(p.input.questions)) {
               ask = { questions: p.input.questions };
@@ -679,10 +679,27 @@ function ingestStreamLine(sessionId, line) {
       // the tool list), and a headless turn ends right after asking.
       if (b.name === 'AskUserQuestion' && b.input && Array.isArray(b.input.questions)) {
         lp.ask = { questions: b.input.questions };
+        // A headless `-p` turn can't pause for input: AskUserQuestion returns
+        // "no answer captured" and the model barrels ahead on an assumption.
+        // Stop the turn here instead — the question becomes the terminal state
+        // and the user's pick (sent as the next turn) carries it forward. This
+        // mirrors interactive Ctrl+C mid-tool; the session stays resumable.
+        pauseForQuestion(sessionId);
       }
     }
   }
   lp.updatedAt = Date.now();
+}
+
+// Stop a running turn the moment it asks a question (see ingestStreamLine).
+// SIGTERM (not cancel) so finish() doesn't log it as an error and Claude Code
+// flushes the question to the transcript; the UI renders it from there.
+function pauseForQuestion(sessionId) {
+  const entry = runningChats.get(sessionId);
+  if (!entry || entry.killed) return;
+  entry.killed = true;          // graceful: not an error, not a user cancel
+  if (entry.timer) clearTimeout(entry.timer);
+  try { entry.child.kill('SIGTERM'); } catch {}
 }
 
 function drainQueue(sessionId) {
