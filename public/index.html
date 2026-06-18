@@ -678,9 +678,9 @@ function openChat(id) {
   document.getElementById('chatSub').textContent =
     `${p.name} · ${STATUS_LABEL[s.status] || s.status}` + (s.gitBranch ? ` · ⎇ ${s.gitBranch}` : '');
   document.getElementById('chatBody').innerHTML = '<div class="empty">Loading conversation…</div>';
-  renderCompose(p, s);
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
+  renderCompose(p, s); // after .show so box.focus() lands on a visible element
   loadTranscript(true);
   checkChatStatus();
   clearInterval(chat.poll);
@@ -706,9 +706,9 @@ function openNewChat(cwd, name) {
   document.getElementById('chatSub').textContent = `${name} · type a message to start`;
   document.getElementById('chatBody').innerHTML =
     '<div class="empty">New headless session in this folder.<br>Send a message to begin — no terminal needed.</div>';
-  renderCompose({ liveTerminals: 0 }, null);
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
+  renderCompose({ liveTerminals: 0 }, null); // after .show so box.focus() lands on a visible element
   checkChatStatus();
   clearInterval(chat.poll);
   chat.poll = setInterval(pollTick, 2000);
