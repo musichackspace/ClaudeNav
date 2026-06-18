@@ -561,6 +561,7 @@ function render() {
         <div class="s-actions">
           <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}">Resume ▸</button>
           <button data-copy="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}" title="Copy resume command">⧉</button>
+          <button data-link="${esc(s.sessionId)}" title="Copy a link that opens this session">🔗</button>
         </div>
       </div>`;
     }
@@ -647,6 +648,10 @@ document.getElementById('content').addEventListener('click', e => {
       const cmd = `cd ${JSON.stringify(btn.dataset.cwd)} && claude --resume ${btn.dataset.copy}`;
       navigator.clipboard.writeText(cmd).then(() => toast('Copied: ' + cmd));
     }
+    else if (btn.dataset.link) {
+      const url = sessionLink(btn.dataset.link);
+      navigator.clipboard.writeText(url).then(() => toast('Link copied: ' + url));
+    }
     else if (btn.dataset.viz) openViz(btn.dataset.viz, btn.dataset.vizname || btn.dataset.viz);
     return;
   }
@@ -664,6 +669,20 @@ function findSession(id) {
   }
   return null;
 }
+
+// Deep links: `#session=<id>` opens that session's chat (works even for idle /
+// hidden sessions, since the list is filtered for display only). sessionLink()
+// builds one for the 🔗 button.
+function sessionLink(id) { return location.origin + '/#session=' + encodeURIComponent(id); }
+let hashJumped = false;
+function jumpToHashSession() {
+  const m = /[#&]session=([\w-]+)/.exec(location.hash || '');
+  const id = m ? m[1] : null;
+  if (!id || chat.sessionId === id) return; // nothing to do / already open
+  if (findSession(id)) openChat(id);
+  else toast('Session not found: ' + id, true);
+}
+window.addEventListener('hashchange', jumpToHashSession);
 
 function openChat(id) {
   const found = findSession(id);
@@ -1250,6 +1269,7 @@ async function load() {
     DATA = await r.json();
     render();
     handleVersion(DATA.version);
+    if (!hashJumped) { hashJumped = true; jumpToHashSession(); } // honor #session=… on first load
   } catch (e) {
     document.getElementById('content').innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>';
   }
