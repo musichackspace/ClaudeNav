@@ -40,6 +40,15 @@
   .lights { display: inline-flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
   .lights .l { display: inline-flex; gap: 5px; align-items: center; }
   .lights .light { width: 10px; height: 10px; }
+  /* Usage limits — mirrors Claude Code's /usage menu (session + weekly bars). */
+  .usage { display: inline-flex; gap: 14px; align-items: center; font-size: 12px; color: var(--muted); }
+  .usage .u { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+  .usage .u-label { color: var(--muted); }
+  .usage .u-bar { width: 64px; height: 6px; border-radius: 3px; background: var(--panel2); border: 1px solid var(--border); overflow: hidden; }
+  .usage .u-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+  .usage .u-fill.warn { background: #e3b341; }
+  .usage .u-fill.bad { background: #f85149; }
+  .usage .u-pct { color: var(--text); font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
   main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   .project {
     background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
@@ -365,6 +374,7 @@
   </label>
   <label class="meta"><input type="checkbox" id="hideIdle" /> Hide idle</label>
   <label class="meta" title="Idle sessions untouched for 7+ days are hidden by default; tick to show them. They stay searchable regardless."><input type="checkbox" id="showStale" /> Show older</label>
+  <span id="usage" class="usage" hidden></span>
   <span id="lights" class="lights"></span>
   <button id="updateBtn" class="update-btn" hidden></button>
   <button id="wrapup">🧹 Wrap-up</button>
@@ -1433,10 +1443,42 @@ async function load() {
     DATA = await r.json();
     render();
     handleVersion(DATA.version);
+    handleUsage(DATA.usage);
     if (!hashJumped) { hashJumped = true; jumpToHashSession(); } // honor #session=… on first load
   } catch (e) {
     document.getElementById('content').innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>';
   }
+}
+
+// --- Usage limits ------------------------------------------------------------
+// Mirrors Claude Code's /usage menu: a compact row of bars for the current
+// session and the weekly limits, fed by the server's /api/oauth/usage proxy.
+function fmtReset(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '';
+  const mins = Math.round((t - Date.now()) / 60000);
+  if (mins <= 0) return 'resets now';
+  if (mins < 60) return `resets in ${mins} min`;
+  const hrs = Math.floor(mins / 60), rem = mins % 60;
+  if (hrs < 24) return `resets in ${hrs} hr${rem ? ' ' + rem + ' min' : ''}`;
+  return 'resets ' + new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+function handleUsage(u) {
+  const el = document.getElementById('usage');
+  if (!el) return;
+  const bars = u ? [u.session, u.weeklyAll, u.weeklyScoped].filter(Boolean) : [];
+  if (!bars.length) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = bars.map(b => {
+    const pct = Math.max(0, Math.min(100, b.percent));
+    const cls = pct >= 90 ? 'bad' : pct >= 75 ? 'warn' : '';
+    const tip = esc(b.label + ' — ' + pct + '% used' + (b.resets_at ? ' · ' + fmtReset(b.resets_at) : ''));
+    return `<span class="u" title="${tip}">`
+      + `<span class="u-label">${esc(b.label)}</span>`
+      + `<span class="u-bar"><span class="u-fill ${cls}" style="width:${pct}%"></span></span>`
+      + `<span class="u-pct">${pct}%</span></span>`;
+  }).join('');
 }
 
 // --- In-app update / relaunch ------------------------------------------------

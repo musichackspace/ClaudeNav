@@ -78,6 +78,13 @@ under launchd's minimal environment.
   canUpdate}`. `bootId`/`bootHead` describe the running process; `head`/`behind`
   reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
   to `/api/sessions` as `version`, so the 5s poll surfaces updates for free.
+- `GET /api/usage` — usage limits mirroring Claude Code's `/usage` menu
+  (`{session, weeklyAll, weeklyScoped}`, each `{label, percent, severity,
+  resets_at}`). Proxies the same source the CLI uses — `GET
+  https://api.anthropic.com/api/oauth/usage` with the stored OAuth access token
+  (`~/.claude/.credentials.json`, else the macOS Keychain
+  `Claude Code-credentials`) — background-refreshed (≤ every 60s). Also attached
+  to `/api/sessions` as `usage`, so the 5s poll keeps the header bars current.
 - `POST /api/update {pull}` — `git pull --ff-only` (when `pull`) then relaunch via
   `process.exit(42)`; `run-server.sh` treats 42 as an intentional restart (no
   crash-cap hit). Powers the header "Update & relaunch" button.

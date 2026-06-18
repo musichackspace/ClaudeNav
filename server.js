@@ -12,6 +12,7 @@
  */
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -871,6 +872,91 @@ function selfUpdate({ pull }, cb) {
   }, 300);
 }
 
+// ---------------------------------------------------------------------------
+// Usage limits — mirrors Claude Code's /usage menu (current session + weekly).
+// Same source the CLI uses: GET /api/oauth/usage with the stored OAuth token.
+// ---------------------------------------------------------------------------
+
+// The OAuth access token lives in the macOS Keychain (Claude Code-credentials)
+// or, on other platforms, in ~/.claude/.credentials.json.
+function readOAuthToken() {
+  try {
+    const raw = fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8');
+    const tok = JSON.parse(raw)?.claudeAiOauth?.accessToken;
+    if (tok) return tok;
+  } catch {}
+  if (process.platform === 'darwin') {
+    try {
+      const raw = execFileSync('security',
+        ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+        { encoding: 'utf8' });
+      const tok = JSON.parse(raw)?.claudeAiOauth?.accessToken;
+      if (tok) return tok;
+    } catch {}
+  }
+  return null;
+}
+
+// Background-refreshed cache of the usage endpoint (networked; don't block).
+let usageState = { at: 0, running: false, data: null, error: null };
+const USAGE_TTL = 60 * 1000;
+function maybeFetchUsage() {
+  const now = Date.now();
+  if (usageState.running || (usageState.at && now - usageState.at < USAGE_TTL)) return;
+  const token = readOAuthToken();
+  if (!token) { usageState = { ...usageState, at: now, error: 'no-token' }; return; }
+  usageState.running = true;
+  const req = https.request('https://api.anthropic.com/api/oauth/usage', {
+    method: 'GET',
+    headers: { 'Authorization': `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
+    timeout: 15000,
+  }, (resp) => {
+    let body = '';
+    resp.on('data', (c) => { body += c; });
+    resp.on('end', () => {
+      usageState.running = false;
+      usageState.at = Date.now();
+      if (resp.statusCode === 200) {
+        try { usageState.data = summarizeUsage(JSON.parse(body)); usageState.error = null; }
+        catch (e) { usageState.error = 'parse'; }
+      } else {
+        usageState.error = `http-${resp.statusCode}`;
+      }
+    });
+  });
+  req.on('error', () => { usageState.running = false; usageState.at = Date.now(); usageState.error = 'network'; });
+  req.on('timeout', () => { req.destroy(); });
+  req.end();
+}
+
+// Reduce the raw payload to the three bars the /usage menu shows.
+function summarizeUsage(raw) {
+  const limits = Array.isArray(raw?.limits) ? raw.limits : [];
+  const pick = (kind) => limits.find((l) => l.kind === kind);
+  const session = pick('session');
+  const weeklyAll = pick('weekly_all');
+  const weeklyScoped = pick('weekly_scoped');
+  const bar = (l, label) => l ? {
+    label,
+    percent: Math.round(l.percent),
+    severity: l.severity || 'normal',
+    resets_at: l.resets_at || null,
+  } : null;
+  return {
+    session: bar(session, 'Current session'),
+    weeklyAll: bar(weeklyAll, 'All models'),
+    weeklyScoped: weeklyScoped
+      ? { ...bar(weeklyScoped, weeklyScoped.scope?.model?.display_name || 'Scoped'),
+          model: weeklyScoped.scope?.model?.display_name || null }
+      : null,
+  };
+}
+
+function usageInfo() {
+  maybeFetchUsage();
+  return { ...usageState.data ? usageState.data : {}, error: usageState.error, at: usageState.at };
+}
+
 function gitInfo(cwd) {
   try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') return { isRepo: false }; }
   catch { return { isRepo: false }; }
@@ -1236,6 +1322,7 @@ const server = http.createServer((req, res) => {
     try {
       const data = buildData();
       try { data.version = versionInfo(); } catch {}
+      try { data.usage = usageInfo(); } catch {}
       return sendJSON(res, 200, data);
     }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
@@ -1243,6 +1330,11 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/api/version') {
     try { return sendJSON(res, 200, versionInfo()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/usage') {
+    try { return sendJSON(res, 200, usageInfo()); }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
   }
 
