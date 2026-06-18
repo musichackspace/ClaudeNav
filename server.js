@@ -181,8 +181,10 @@ function getLiveTerminals() {
 // ---------------------------------------------------------------------------
 
 // Classify a session's state from its tail records + liveness.
-//   working      — mid-turn and active: a terminal is live, it was just touched,
-//                  or the server itself is running a headless turn for it.
+//   working      — mid-turn and actively producing output: the transcript was
+//                  written to in the last 90s, or the server is running a headless
+//                  turn for it. NOT based on terminal liveness — that's detected
+//                  per-directory and can't tell an exited session from a sibling.
 //   waiting      — last assistant turn ended (end_turn) and it's live/recent:
 //                  your turn, waiting for input.
 //   idle         — parked: nothing running. Includes mid-turn sessions that are
@@ -197,16 +199,23 @@ function computeStatus(s) {
   if (serverActive) return 'working';
 
   const recentMs = Date.now() - (s.mtimeMs || 0);
-  const veryRecent = recentMs < 30 * 1000;          // touched in last 30s
+  const activelyWriting = recentMs < 90 * 1000;     // transcript written in last 90s
   const recent = recentMs < 5 * 60 * 1000;          // touched in last 5 min
   const longAbandoned = recentMs > 30 * 60 * 1000;  // mid-turn, untouched 30 min+
   const ended = s.lastStopReason === 'end_turn';
   const midTurn = s.lastEventType === 'user' || (s.lastStopReason && !ended);
 
   if (midTurn) {
-    if (veryRecent || s.likelyLive) return 'working';
+    // "working" must mean actually producing output. We deliberately do NOT trust
+    // s.likelyLive here: liveness is detected per working-directory, so a session
+    // you've exited still looks "live" whenever a sibling terminal runs in the same
+    // dir — which made exited mid-turn sessions show amber "working" indefinitely.
+    // A real in-progress turn writes blocks continuously, so a recent transcript
+    // write is the only trustworthy signal; everything else mid-turn is paused or
+    // abandoned. (serverActive, handled above, covers headless turns we run.)
+    if (activelyWriting) return 'working';
     if (longAbandoned) return 'interrupted';  // really left half-done → needs you
-    return 'idle';                            // paused / headless — don't alarm
+    return 'idle';                            // paused / exited / headless — don't alarm
   }
   if (ended && (s.likelyLive || recent)) return 'waiting';
   return 'idle';
