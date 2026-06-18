@@ -25,13 +25,28 @@ npm install            # once, installs @tauri-apps/cli
 npm run app:dev        # compile + launch the app with live reload
 ```
 
-## Build a distributable
+## Install (macOS)
+
+The canonical path — builds the release bundle and installs exactly one copy
+into `/Applications` so it's launchable by name from Spotlight:
 
 ```bash
-npm run app:build      # produces a .app / .dmg (macOS), .msi/.exe (Windows), .deb/.AppImage (Linux)
+./install-app.sh            # from the repo root
+./install-app.sh uninstall
 ```
 
-Bundled artifacts land in `src-tauri/target/release/bundle/`.
+Re-running rebuilds and replaces the installed copy in place (never more than
+one ClaudeNav.app in /Applications).
+
+## Build a distributable (any platform)
+
+```bash
+npm run app:build      # .app/.dmg (macOS), .msi/.exe (Windows), .deb/.AppImage (Linux)
+```
+
+Bundled artifacts land in `src-tauri/target/release/bundle/`. `install-app.sh`
+is macOS-only (it installs a `.app`); on Windows/Linux use the installer output
+here directly.
 
 ## Icons
 
