@@ -640,6 +640,12 @@ function ingestStreamLine(sessionId, line) {
     if (b.type === 'text' && b.text) lp.text = (lp.text + b.text).slice(-8000);
     else if (b.type === 'tool_use' && b.name) {
       lp.tools.push({ name: b.name, detail: clip(toolDetail(b.name, b.input)), body: clip(toolBody(b.name, b.input)) });
+      // Surface an interactive question the moment it streams in — otherwise it
+      // stays hidden until the turn finalizes (AskUserQuestion is filtered out of
+      // the tool list), and a headless turn ends right after asking.
+      if (b.name === 'AskUserQuestion' && b.input && Array.isArray(b.input.questions)) {
+        lp.ask = { questions: b.input.questions };
+      }
     }
   }
   lp.updatedAt = Date.now();
@@ -670,7 +676,7 @@ function drainQueue(sessionId) {
   }
 
   const child = spawn(CLAUDE_BIN, args, { cwd });
-  livePartial.set(sessionId, { text: '', tools: [], updatedAt: Date.now() });
+  livePartial.set(sessionId, { text: '', tools: [], ask: null, updatedAt: Date.now() });
 
   let buf = '';
   let stderrTail = '';
@@ -1332,7 +1338,7 @@ const server = http.createServer((req, res) => {
       running: runningChats.has(id) || queued > 0,
       queued,
       error: lastChatError.get(id) || null,
-      partial: lp ? { text: lp.text, tools: lp.tools } : null,
+      partial: lp ? { text: lp.text, tools: lp.tools, ask: lp.ask || null } : null,
     });
   }
 

@@ -253,6 +253,14 @@
   /* Interactive question card — renders an AskUserQuestion's options as
      clickable choices so a headless turn's prompt doesn't dead-end. */
   .askcard { border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; margin-top: 8px; background: var(--panel2); }
+  /* An active (awaiting-answer) question gets an accent border + a banner so
+     it's impossible to miss; superseded/answered cards (.inert) stay quiet. */
+  .askcard:not(.inert) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .askcard:not(.inert)::before {
+    content: "💬 Claude needs your input — pick an option";
+    display: block; font-size: 11px; font-weight: 600; letter-spacing: .3px;
+    color: var(--accent); margin-bottom: 8px;
+  }
   .askblock { margin-bottom: 12px; }
   .askblock:last-of-type { margin-bottom: 8px; }
   .askq { font-weight: 600; margin-bottom: 8px; }
@@ -1077,7 +1085,15 @@ function refreshAsks() {
     const idx = rows.indexOf(card.closest('.msg'));
     if (idx > lastUser) live = card; // latest unanswered wins
   });
-  if (live) live.classList.remove('inert');
+  if (live) {
+    live.classList.remove('inert');
+    // Pull a freshly-activated question into view once, so it's never missed
+    // below the fold (it doesn't re-scroll on every 2s poll).
+    if (!live.dataset.seen) {
+      live.dataset.seen = '1';
+      requestAnimationFrame(() => live.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    }
+  }
 }
 
 // Compose the answer in Claude's native format and send it as the next turn.
@@ -1129,17 +1145,21 @@ function renderStreaming(partial) {
   if (!body) return;
   const ph = body.querySelector('.empty'); if (ph) ph.remove();
   const toolLine = renderTools(partial.tools);
+  const askHtml = partial.ask ? renderAsk(partial.ask) : '';
   const textHtml = partial.text
     ? `<div class="bubble">${md(partial.text)}</div>`
-    : (toolLine ? '' : `<div class="bubble"><span class="typing">▍</span></div>`);
-  const inner = `<div class="who">Claude</div>${textHtml}${toolLine}`;
+    : ((toolLine || askHtml) ? '' : `<div class="bubble"><span class="typing">▍</span></div>`);
+  const inner = `<div class="who">Claude</div>${textHtml}${toolLine}${askHtml}`;
   const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 200;
   let el = body.querySelector('.msg.streaming');
   if (!el) {
     body.insertAdjacentHTML('beforeend', `<div class="msg assistant streaming">${inner}</div>`);
-  } else {
+  } else if (!el.querySelector('.askcard')) {
+    // A question is the terminal block of a turn — once shown, leave it alone so
+    // selections survive and it doesn't re-scroll on every poll.
     el.innerHTML = inner;
   }
+  if (askHtml) refreshAsks();
   if (nearBottom) pinToBottom(body);
 }
 function clearStreaming() {
@@ -1170,7 +1190,7 @@ async function checkChatStatus() {
     const r = await fetch(`/api/chat-status?session=${encodeURIComponent(chat.sessionId)}`);
     const j = await r.json();
     setStatus(j.running, j.queued || 0);
-    if (j.running && j.partial && (j.partial.text || (j.partial.tools && j.partial.tools.length))) {
+    if (j.running && j.partial && (j.partial.text || j.partial.ask || (j.partial.tools && j.partial.tools.length))) {
       renderStreaming(j.partial);
     } else if (!j.running) {
       clearStreaming();
