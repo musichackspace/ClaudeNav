@@ -1140,26 +1140,30 @@ function dropLastEcho() {
 
 // Live, in-flight assistant output (block-level), rebuilt from chat-status each
 // poll. Removed as soon as the finalized message arrives via the transcript.
+// NB: the interactive question card is deliberately NOT rendered here — only
+// from the finalized transcript (renderMsg). Drawing it from the live partial
+// too raced the transcript poll: the two pollers fire concurrently every 2s, so
+// during the running→finished flip you'd get a duplicate card (and refreshAsks
+// would mark the one you're clicking inert), and clearStreaming() would wipe any
+// options you'd already selected. The transcript always records the AskUser
+// Question tool_use, and headless turns finalize right after asking, so the
+// card still appears within a poll — just from a single, stable source.
 function renderStreaming(partial) {
   const body = document.getElementById('chatBody');
   if (!body) return;
   const ph = body.querySelector('.empty'); if (ph) ph.remove();
   const toolLine = renderTools(partial.tools);
-  const askHtml = partial.ask ? renderAsk(partial.ask) : '';
   const textHtml = partial.text
     ? `<div class="bubble">${md(partial.text)}</div>`
-    : ((toolLine || askHtml) ? '' : `<div class="bubble"><span class="typing">▍</span></div>`);
-  const inner = `<div class="who">Claude</div>${textHtml}${toolLine}${askHtml}`;
+    : (toolLine ? '' : `<div class="bubble"><span class="typing">▍</span></div>`);
+  const inner = `<div class="who">Claude</div>${textHtml}${toolLine}`;
   const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 200;
   let el = body.querySelector('.msg.streaming');
   if (!el) {
     body.insertAdjacentHTML('beforeend', `<div class="msg assistant streaming">${inner}</div>`);
-  } else if (!el.querySelector('.askcard')) {
-    // A question is the terminal block of a turn — once shown, leave it alone so
-    // selections survive and it doesn't re-scroll on every poll.
+  } else {
     el.innerHTML = inner;
   }
-  if (askHtml) refreshAsks();
   if (nearBottom) pinToBottom(body);
 }
 function clearStreaming() {
