@@ -43,9 +43,16 @@ fi
 # Pick up a rustup install that isn't on the login PATH yet.
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "error: Rust toolchain not found. Install it once with:" >&2
-  echo "       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
-  exit 1
+  echo "==> Rust toolchain not found — installing via rustup (one time)…"
+  # Default profile install — sets up PATH in the user's shell profile too, so
+  # `cargo`/`npm run app:dev` work in future shells, not just this script.
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+  command -v cargo >/dev/null 2>&1 || {
+    echo "error: rustup install did not put cargo on PATH; open a new shell and re-run." >&2
+    exit 1
+  }
 fi
 command -v node >/dev/null 2>&1 || { echo "error: node not found on PATH" >&2; exit 1; }
 

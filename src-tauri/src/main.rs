@@ -112,6 +112,32 @@ fn resolve_server_js(app: &tauri::App) -> Option<PathBuf> {
     None
 }
 
+// Watch the server and recover the window when it relaunches. The server can
+// go away from under us — most notably the in-app "Update & relaunch" button
+// (git pull + restart). When that happens the WebView is stuck on Chromium's
+// connection-refused page, which runs no JS, so a page-level script can't heal
+// it. We poll from the native side and, on a down->up transition, re-navigate
+// the window to the URL (this replaces the error page, unlike a no-op reload).
+fn spawn_reconnect_watcher(app: tauri::AppHandle, url: String) {
+    std::thread::spawn(move || {
+        // The window is only created after the first successful health check,
+        // so we start in the "up" state and act on the next down->up edge.
+        let mut was_up = true;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let up = port_is_open();
+            if up && !was_up {
+                if let Some(win) = app.get_webview_window("main") {
+                    if let Ok(parsed) = url.parse() {
+                        let _ = win.navigate(parsed);
+                    }
+                }
+            }
+            was_up = up;
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(ServerProcess(Mutex::new(None)))
@@ -150,6 +176,7 @@ fn main() {
             .min_inner_size(720.0, 480.0)
             .build()?;
 
+            spawn_reconnect_watcher(app.handle().clone(), url);
             Ok(())
         })
         .build(tauri::generate_context!())
