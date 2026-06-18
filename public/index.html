@@ -113,6 +113,10 @@
   .update-btn:hover { filter: brightness(1.1); border-color: var(--accent); }
   .update-btn.stale { background: rgba(227,179,65,.18); color: #e3b341; border-color: rgba(227,179,65,.4); }
   .update-btn[disabled] { opacity: .6; cursor: default; }
+  /* Idle = "up to date" status chip: always visible so the feature is
+     discoverable, but quiet and non-actionable until there's something new. */
+  .update-btn.idle { background: var(--chip); color: var(--muted); border-color: var(--border); font-weight: 400; cursor: default; opacity: 1; }
+  .update-btn.idle:hover { filter: none; border-color: var(--border); }
   .stale-note {
     color: var(--muted); font-size: 12px; text-align: center; padding: 16px 20px 24px;
   }
@@ -1280,19 +1284,32 @@ function handleVersion(v) {
     }
   }
   updateState = state;
-  if (!state) { btn.hidden = true; return; }
-  if (btn.disabled) return; // a relaunch is already in flight — don't stomp the label
+  if (!btn) return;
+  if (btn.dataset.busy === '1') return; // a relaunch is in flight — leave the label alone
   btn.hidden = false;
-  btn.textContent = label;
-  btn.title = title;
-  btn.classList.toggle('stale', stale);
+  if (!state) {
+    // Up to date: a quiet, non-actionable status chip (keeps the feature visible).
+    btn.disabled = true;
+    btn.classList.add('idle');
+    btn.classList.remove('stale');
+    btn.textContent = '✓ Up to date';
+    btn.title = `ClaudeNav is running the latest code (${v.head || v.bootHead || '—'}).`;
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('idle');
+    btn.classList.toggle('stale', stale);
+    btn.textContent = label;
+    btn.title = title;
+  }
 }
 
 async function doUpdate() {
   const btn = document.getElementById('updateBtn');
   if (updateState === 'reload') { location.reload(); return; }
   const pull = updateState === 'update';
+  btn.dataset.busy = '1';
   btn.disabled = true;
+  btn.classList.remove('idle');
   btn.textContent = pull ? 'Updating…' : 'Relaunching…';
   try {
     const r = await fetch('/api/update', {
@@ -1303,7 +1320,7 @@ async function doUpdate() {
     if (!r.ok) throw new Error(j.error || 'update failed');
   } catch (e) {
     toast('Update failed: ' + e.message, true);
-    btn.disabled = false; handleVersion(DATA.version);
+    btn.dataset.busy = ''; btn.disabled = false; handleVersion(DATA.version);
     return;
   }
   // Server is exiting; run-server.sh relaunches it. Poll until a new bootId, then reload.
@@ -1317,7 +1334,7 @@ async function doUpdate() {
     } catch { /* server still down between exit and relaunch */ }
   }
   toast('Server is taking a while — reload manually when it’s back.', true);
-  btn.disabled = false;
+  btn.dataset.busy = ''; btn.disabled = false;
 }
 
 // --- Housekeeping / Wrap-up --------------------------------------------------
