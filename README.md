@@ -25,6 +25,30 @@ terminals via AppleScript). Binds to `127.0.0.1` only.
 
 Change the port with `PORT=5000 node server.js`.
 
+## Desktop app (macOS)
+
+Prefer launching ClaudeNav by name from Spotlight/Launchpad instead of a browser
+tab? Build and install the native app — one canonical command, and it installs
+exactly one copy into `/Applications`:
+
+```bash
+./install-app.sh            # build the release bundle + install to /Applications
+./install-app.sh uninstall  # quit + remove it
+```
+
+Then ⌘-Space → "ClaudeNav". The app is a thin [Tauri](https://tauri.app) shell
+(`src-tauri/`) around the same `server.js` — it doesn't duplicate any backend
+logic. On launch it reuses an already-running server (e.g. the LaunchAgent
+below) if one is up, otherwise it starts `node server.js` itself and stops it on
+quit.
+
+Re-running `./install-app.sh` rebuilds from your clone and replaces the
+installed copy in place, so everyone ends up with the same artifact and there's
+never more than one in `/Applications`. First run installs the build toolchain
+prerequisites (Rust must be present — `curl --proto '=https' --tlsv1.2 -sSf
+https://sh.rustup.rs | sh` once if not). See `src-tauri/README.md` for the
+internals and the Windows/Linux build path.
+
 ## What it shows
 
 - **Projects** grouped by working directory, live ones first.
