@@ -101,12 +101,21 @@
   .s-meta.warn .tok:last-of-type { color: #e3b341; }
   .s-meta.hot .tok:last-of-type { color: #f85149; }
   .freshhint {
-    display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
-    font-size: 11px; padding: 2px 8px; border-radius: 99px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 4px;
+    font-size: 11px; padding: 2px 4px 2px 8px; border-radius: 99px;
     background: rgba(248,81,73,.14); color: #f85149; border: 1px solid rgba(248,81,73,.3);
   }
   .freshhint.warn { background: rgba(227,179,65,.14); color: #e3b341; border-color: rgba(227,179,65,.3); }
-  .freshhint:hover { filter: brightness(1.25); }
+  .freshhint .hintbtn {
+    font-size: 11px; line-height: 1; padding: 3px 8px; border-radius: 99px; cursor: pointer;
+    color: inherit; background: rgba(255,255,255,.06); border: 1px solid currentColor;
+  }
+  .freshhint .hintbtn:hover { background: rgba(255,255,255,.14); }
+  /* filled "Hand over" — accent fill, dark text for contrast */
+  .freshhint .hintbtn.primary { background: #f85149; color: #0d1117; border-color: transparent; }
+  .freshhint.warn .hintbtn.primary { background: #e3b341; }
+  .freshhint .hintbtn.primary:hover { filter: brightness(1.1); background: #f85149; }
+  .freshhint.warn .hintbtn.primary:hover { background: #e3b341; }
   .update-btn {
     background: var(--accent); color: #1a1d23; border-color: var(--accent); font-weight: 600;
   }
@@ -566,11 +575,18 @@ function render() {
         `cache read ${fmtTok(t.cacheRead)} · context ${fmtTok(s.contextTokens)} (${ctxPct}% of ${win === CTX_WINDOW ? '200K' : '1M'})` +
         (model ? ` · ${esc(model)}` : '');
       // Token hygiene: a context-heavy session re-sends its whole history every
-      // turn (slower, pricier, more drift). Nudge toward a fresh worktree session.
+      // turn (slower, pricier, more drift). Offer the two real remedies — compact
+      // in place (same thread) or hand over to a fresh session (keeps continuity).
+      // ("+ New session" stays separate: that's a blank session for unrelated work.)
       const hint = tier && s.status !== 'working'
-        ? `<div class="freshhint ${tier}" data-fresh="${esc(p.cwd)}" data-freshname="${esc(p.name)}"
-             title="This session's context is ${ctxPct}% full. Each new turn re-sends the whole history — costlier and the model drifts. Start a clean session for new work; resume this one only to finish its current thread.">
-             ${tier === 'hot' ? '⚠ Context heavy' : '◐ Context filling'} — start fresh ▸</div>`
+        ? `<div class="freshhint ${tier}"
+             title="This session's context is ${ctxPct}% full. Each new turn re-sends the whole history — costlier, and the model drifts.">
+             <span>${tier === 'hot' ? '⚠ Context heavy' : '◐ Context filling'} (${ctxPct}%)</span>
+             <button class="hintbtn" data-compact="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}"
+               title="Compact in place: summarises old history within THIS session, keeping the same thread. Frees context, no new session.">Compact</button>
+             <button class="hintbtn primary" data-handover="${esc(s.sessionId)}"
+               title="Hand over: writes a handoff brief, then opens a NEW session seeded with it. Fresh context, full continuity — continue work there and wrap this one up.">Hand over ▸</button>
+           </div>`
         : '';
       html += `<div class="session" data-session="${esc(s.sessionId)}" title="Click to view conversation">
         <span class="light ${s.status}" title="${STATUS_LABEL[s.status] || s.status}"></span>
@@ -662,14 +678,14 @@ document.getElementById('folders').addEventListener('click', e => {
 
 document.getElementById('content').addEventListener('click', e => {
   if (e.target.id === 'revealStale') { setShowStale(true); return; }
-  const fresh = e.target.closest('.freshhint');
-  if (fresh) { openIsolated(fresh.dataset.fresh, fresh.dataset.freshname || fresh.dataset.fresh); return; }
   const btn = e.target.closest('button');
   if (btn) {
     if (btn.dataset.collapse !== undefined) {
       setCollapsed(btn.dataset.collapse, !collapsed.has(btn.dataset.collapse));
       render();
     }
+    else if (btn.dataset.handover) doHandover(btn.dataset.handover);
+    else if (btn.dataset.compact) doCompact(btn.dataset.compact, btn.dataset.cwd);
     else if (btn.dataset.newsession) openIsolated(btn.dataset.newsession, btn.dataset.newname || btn.dataset.newsession);
     else if (btn.dataset.resume) openTerminal({ cwd: btn.dataset.cwd, sessionId: btn.dataset.resume });
     else if (btn.dataset.copy) {
@@ -788,6 +804,34 @@ async function openIsolated(cwd, name) {
     openNewChat(j.path, name + ' (' + j.branch + ')');
     toast('Worktree ' + j.branch);
   } catch (e) { toast('Worktree failed: ' + e.message, true); }
+}
+
+// Compact a heavy session in place: send the `/compact` slash command as a turn.
+// The CLI summarises older history within the SAME session, freeing context
+// without breaking the thread. Context shrinks once the turn completes.
+async function doCompact(sessionId, cwd) {
+  toast('Compacting session…');
+  try {
+    await api('/api/chat', { session: sessionId, text: '/compact', cwd });
+    toast('Compaction started — context will shrink when it finishes');
+    setTimeout(load, 2000);
+  } catch (e) { toast('Compact failed: ' + e.message, true); }
+}
+
+// Hand over to a fresh session: the server has this session write a handoff brief
+// (one added turn), then seeds a brand-new session with it. We then jump into the
+// new session so work continues with clean context but full continuity.
+async function doHandover(sessionId) {
+  if (!confirm('Hand over to a fresh session?\n\nThis session writes a handoff brief (one extra turn), '
+    + 'then a new session opens seeded with it. Continue work in the new one and wrap this up.\n\nThis can take a minute.')) return;
+  toast('Writing handoff brief, then seeding a fresh session…');
+  try {
+    const j = await api('/api/handover', { session: sessionId });
+    toast('Handed over → opening the fresh session');
+    await load();
+    if (findSession(j.newSession)) openChat(j.newSession);
+    else { location.hash = '#session=' + j.newSession; toast('New session created: ' + j.newSession); }
+  } catch (e) { toast('Handover failed: ' + e.message, true); }
 }
 
 // --- Traffic-light feedback --------------------------------------------------

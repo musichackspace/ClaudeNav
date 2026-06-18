@@ -60,6 +60,10 @@ under launchd's minimal environment.
   to known-session directories.
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
 - `POST /api/assess {session}` — AI "is it safe to wrap?" (adds a turn).
+- `POST /api/handover {session}` — for a context-heavy session: have it write a
+  handoff brief (one added turn), then seed a brand-new session with it and return
+  `{newSession, brief}`. Carries the thread forward with clean context (unlike the
+  blank "+ New session"). Compaction in place is just `/compact` sent via `/api/chat`.
 - `POST /api/close {session}` — SIGTERM the live `claude` process(es) in the
   session's cwd (graceful; transcript persists, resumable).
 - `POST /api/open` — open Terminal/iTerm (resume or new). `/uploads/<name>` —
