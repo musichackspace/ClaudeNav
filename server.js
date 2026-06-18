@@ -339,8 +339,54 @@ function findSessionFile(sessionId) {
   return null;
 }
 
+// Tool detail/output strings are folded into the transcript payload so the UI
+// can expand each tool call. Cap them so a huge file read or `find /` dump can't
+// bloat the JSON (and the browser) — the on-disk transcript stays authoritative.
+const TOOL_CAP = 6000;
+function clip(s) {
+  s = typeof s === 'string' ? s : (s == null ? '' : String(s));
+  return s.length > TOOL_CAP ? s.slice(0, TOOL_CAP) + `\n… (${s.length - TOOL_CAP} more chars)` : s;
+}
+
+// One-line summary shown on the collapsed tool row (command, path, pattern…).
+function toolDetail(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  switch (name) {
+    case 'Bash': return input.command || input.description || '';
+    case 'Read': case 'Write': case 'Edit': case 'NotebookEdit': return input.file_path || input.notebook_path || '';
+    case 'Grep': return input.pattern || '';
+    case 'Glob': return input.pattern || '';
+    case 'Task': case 'Agent': return input.description || '';
+    case 'WebFetch': return input.url || '';
+    case 'WebSearch': return input.query || '';
+    case 'Skill': return input.skill || '';
+    default: {
+      const v = Object.values(input).find(x => typeof x === 'string');
+      return v || '';
+    }
+  }
+}
+
+// Full input rendering for the expanded view.
+function toolBody(name, input) {
+  if (input == null) return '';
+  if (typeof input === 'string') return input;
+  if (name === 'Bash') return String(input.command || '');
+  if (name === 'Edit') return `${input.file_path || ''}\n\n--- replace ---\n${input.old_string || ''}\n\n--- with ---\n${input.new_string || ''}`;
+  if (name === 'Write') return `${input.file_path || ''}\n\n${input.content || ''}`;
+  try { return JSON.stringify(input, null, 2); } catch { return ''; }
+}
+
+// tool_result content is a string or an array of {type:'text',text} blocks.
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.filter(p => p && p.type === 'text').map(p => p.text).join('\n');
+  return '';
+}
+
 function parseTranscript(filePath) {
   const messages = [];
+  const toolUseById = new Map(); // tool_use id -> tool object, so results can attach
   const content = fs.readFileSync(filePath, 'utf8');
   for (const line of content.split('\n')) {
     if (!line) continue;
@@ -355,6 +401,19 @@ function parseTranscript(filePath) {
         : Array.isArray(c)
           ? c.filter(p => p && p.type === 'text').map(p => p.text).join('\n')
           : '';
+      // Tool results ride in on (otherwise skipped) user messages — attach each
+      // back to the tool_use that produced it so the UI can show the output.
+      if (Array.isArray(c)) {
+        for (const p of c) {
+          if (p && p.type === 'tool_result' && p.tool_use_id) {
+            const tool = toolUseById.get(p.tool_use_id);
+            if (tool) {
+              tool.output = clip(resultText(p.content));
+              if (p.is_error) tool.error = true;
+            }
+          }
+        }
+      }
       // Skip messages that are purely tool results (no human text).
       const onlyToolResult = Array.isArray(c) && c.every(p => p && p.type === 'tool_result');
       if (text.trim() && !onlyToolResult) {
@@ -370,7 +429,9 @@ function parseTranscript(filePath) {
           if (!p) continue;
           if (p.type === 'text') text += (text ? '\n' : '') + p.text;
           else if (p.type === 'tool_use') {
-            tools.push(p.name);
+            const tool = { name: p.name, detail: clip(toolDetail(p.name, p.input)), body: clip(toolBody(p.name, p.input)) };
+            tools.push(tool);
+            if (p.id) toolUseById.set(p.id, tool);
             // Surface the structured choices behind an interactive question so the
             // browser can render clickable options. Headless turns auto-dismiss the
             // prompt (the user never sees it), but the questions+options live right
@@ -495,7 +556,9 @@ function ingestStreamLine(sessionId, line) {
   if (!lp) return;
   for (const b of (o.message.content || [])) {
     if (b.type === 'text' && b.text) lp.text = (lp.text + b.text).slice(-8000);
-    else if (b.type === 'tool_use' && b.name) lp.tools.push(b.name);
+    else if (b.type === 'tool_use' && b.name) {
+      lp.tools.push({ name: b.name, detail: clip(toolDetail(b.name, b.input)), body: clip(toolBody(b.name, b.input)) });
+    }
   }
   lp.updatedAt = Date.now();
 }
