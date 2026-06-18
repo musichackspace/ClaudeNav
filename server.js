@@ -51,6 +51,7 @@ function parseSessionFile(filePath, stat) {
   let contextTokens = 0; // size of the most recent turn's context window
   let lastEventType = null; // 'user' | 'assistant' — last conversational record
   let lastStopReason = null; // stop_reason of the most recent assistant turn
+  let lastUserText = null; // text of the most recent user message (for ack detection)
 
   const content = fs.readFileSync(filePath, 'utf8');
   for (const line of content.split('\n')) {
@@ -84,6 +85,10 @@ function parseSessionFile(filePath, stat) {
             ? c.filter(p => p && p.type === 'text').map(p => p.text).join(' ')
             : null;
         if (text && !firstUserPrompt) firstUserPrompt = text.trim();
+        // Track the latest real user message. Skip tool_result-only and
+        // command/meta records (e.g. /compact, hook output) so a genuine reply
+        // is what we test for a sign-off ack later.
+        if (text && text.trim() && !o.isMeta) lastUserText = text.trim();
         break;
       }
       case 'assistant': {
@@ -123,6 +128,7 @@ function parseSessionFile(filePath, stat) {
     contextTokens,
     lastEventType,
     lastStopReason,
+    lastUserText,
     firstTs,
     lastTs,
     mtimeMs: stat.mtimeMs,
@@ -180,16 +186,36 @@ function getLiveTerminals() {
 // Build the full session list grouped by project
 // ---------------------------------------------------------------------------
 
+// A short closing acknowledgement from the user ("thanks", "perfect", "👍") — the
+// "satisfactory user response" that signals the thread actually concluded. Kept
+// deliberately tight: it must be a brief sign-off, not "thanks, now also do X"
+// (which is still unfinished work). Anything longer than a one-liner fails.
+function looksLikeClosingAck(text) {
+  if (!text) return false;
+  // Normalise: drop punctuation/whitespace, keep letters + the few emoji we allow.
+  const t = text.trim().toLowerCase();
+  if (t.length > 40) return false;                 // a real instruction, not a sign-off
+  const stripped = t.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const ACK = /^(thanks|thank you|thanks a lot|thanks so much|thank you so much|thx|ty|cheers|perfect|great|great stuff|awesome|nice|nice one|brilliant|lovely|excellent|lgtm|looks good|looks great|ship it|all good|that works|works|done|sorted|sweet|fab|wonderful)( now)?$/;
+  if (ACK.test(stripped)) return true;
+  // Pure emoji sign-offs (👍 🙏 🎉 ✅ 🙌 etc.) with no other words.
+  if (!stripped && /[\u{1F44D}\u{1F64F}\u{1F389}✅\u{1F64C}\u{1F525}❤\u{1F60A}]/u.test(t)) return true;
+  return false;
+}
+
 // Classify a session's state from its tail records + liveness.
 //   working      — mid-turn and actively producing output: the transcript was
 //                  written to in the last 90s, or the server is running a headless
 //                  turn for it. NOT based on terminal liveness — that's detected
 //                  per-directory and can't tell an exited session from a sibling.
-//   waiting      — last assistant turn ended (end_turn) and it's live/recent:
-//                  your turn, waiting for input.
-//   idle         — parked: nothing running. Includes mid-turn sessions that are
-//                  merely paused or running headless somewhere we can't detect —
-//                  we do NOT cry "interrupted" for those.
+//   waiting      — "Your turn": the assistant ended its turn (end_turn) and is
+//                  waiting on you, OR a turn was left parked without reaching a
+//                  conclusion. This is independent of how long ago it was: an
+//                  unanswered turn doesn't become "done" just because time passed.
+//   idle         — genuinely concluded: the thread ended on a satisfactory user
+//                  acknowledgement (a sign-off). These are the only ones we treat
+//                  as finished/parked. (Merge/wrap conclusions are surfaced by the
+//                  housekeeping panel, which has the git state this view doesn't.)
 //   interrupted  — mid-turn and untouched for 30+ min: genuinely left half-done.
 function computeStatus(s) {
   // A turn this server is running (or has queued) for the session counts as live,
@@ -200,10 +226,16 @@ function computeStatus(s) {
 
   const recentMs = Date.now() - (s.mtimeMs || 0);
   const activelyWriting = recentMs < 90 * 1000;     // transcript written in last 90s
-  const recent = recentMs < 5 * 60 * 1000;          // touched in last 5 min
   const longAbandoned = recentMs > 30 * 60 * 1000;  // mid-turn, untouched 30 min+
   const ended = s.lastStopReason === 'end_turn';
-  const midTurn = s.lastEventType === 'user' || (s.lastStopReason && !ended);
+  const lastWasUser = s.lastEventType === 'user';
+  const midTurn = lastWasUser || (s.lastStopReason && !ended);
+
+  // A satisfactory sign-off from the user is the one thing that marks a thread
+  // done. It can land either as the final record (lastWasUser) or right before
+  // the assistant's closing reply — only the user-message case is unambiguous,
+  // so that's all we trust.
+  if (lastWasUser && looksLikeClosingAck(s.lastUserText)) return 'idle';
 
   if (midTurn) {
     // "working" must mean actually producing output. We deliberately do NOT trust
@@ -211,13 +243,16 @@ function computeStatus(s) {
     // you've exited still looks "live" whenever a sibling terminal runs in the same
     // dir — which made exited mid-turn sessions show amber "working" indefinitely.
     // A real in-progress turn writes blocks continuously, so a recent transcript
-    // write is the only trustworthy signal; everything else mid-turn is paused or
-    // abandoned. (serverActive, handled above, covers headless turns we run.)
+    // write is the only trustworthy signal. (serverActive, above, covers headless.)
     if (activelyWriting) return 'working';
     if (longAbandoned) return 'interrupted';  // really left half-done → needs you
-    return 'idle';                            // paused / exited / headless — don't alarm
+    // Parked mid-turn with no conclusion: the goal wasn't reached, so this still
+    // needs you. Previously this fell through to "idle" and quietly disappeared.
+    return 'waiting';
   }
-  if (ended && (s.likelyLive || recent)) return 'waiting';
+  // Assistant ended its turn and is waiting on you. That's your turn no matter how
+  // old it is — it only becomes "idle" once you actually wrap/ack it (above).
+  if (ended) return 'waiting';
   return 'idle';
 }
 

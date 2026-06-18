@@ -444,11 +444,16 @@ const CTX_WINDOW = 200000;
 const STATUS_LABEL = { working: 'Working', waiting: 'Your turn', interrupted: 'Interrupted', idle: 'Idle' };
 // Hide idle (finished/parked) sessions, remembered across refreshes.
 let hideIdle = localStorage.getItem('cn-hide-idle') === '1';
-// By default, collapse idle sessions untouched for 7+ days out of the main list
+// By default, collapse sessions untouched for 7+ days out of the main list
 // (they stay searchable). "Show older" reveals them; remembered across refreshes.
+// Includes old "Your turn" sessions: an unanswered turn stays your turn forever,
+// but after a week it shouldn't crowd the live view — fold it away like idle.
 let showStale = localStorage.getItem('cn-show-stale') === '1';
 const STALE_MS = 7 * 24 * 60 * 60 * 1000;
-function isStale(s) { return s.status === 'idle' && (Date.now() - (s.mtimeMs || 0)) > STALE_MS; }
+function isStale(s) {
+  return (s.status === 'idle' || s.status === 'waiting')
+    && (Date.now() - (s.mtimeMs || 0)) > STALE_MS;
+}
 // Context-fill thresholds (% of the model's window) that prompt token-hygiene UX.
 const CTX_WARN = 60, CTX_HOT = 85;
 function shortModel(m) {
@@ -613,13 +618,13 @@ function render() {
   }
 
   if (hiddenStale) {
-    html += `<div class="stale-note">${hiddenStale} idle session${hiddenStale > 1 ? 's' : ''} untouched for 7+ days hidden — <a id="revealStale">show older</a> or search to find ${hiddenStale > 1 ? 'them' : 'it'}.</div>`;
+    html += `<div class="stale-note">${hiddenStale} session${hiddenStale > 1 ? 's' : ''} untouched for 7+ days hidden — <a id="revealStale">show older</a> or search to find ${hiddenStale > 1 ? 'them' : 'it'}.</div>`;
   }
 
   const emptyMsg = q
     ? 'No sessions match your search.'
     : hiddenStale
-      ? `No active sessions — ${hiddenStale} older idle session${hiddenStale > 1 ? 's are' : ' is'} hidden. <a id="revealStale">Show older</a> or search.`
+      ? `No active sessions — ${hiddenStale} older session${hiddenStale > 1 ? 's are' : ' is'} hidden. <a id="revealStale">Show older</a> or search.`
       : (hideIdle ? 'No active sessions — idle sessions are hidden.' : 'No sessions.');
   root.innerHTML = shown ? html : `<div class="empty">${emptyMsg}</div>`;
   document.getElementById('status').textContent =
