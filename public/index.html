@@ -204,6 +204,34 @@
   .bubble { padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--border); }
   .msg.assistant .bubble { border-color: transparent; padding-left: 0; }
   .tooluse { color: var(--muted); font-size: 12px; font-style: italic; }
+  /* Expandable tool calls — collapsed shows name + one-line detail; click to
+     reveal the full input and the tool's output. */
+  .tools { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+  .tool { border: 1px solid var(--border); border-radius: 8px; background: var(--panel2); overflow: hidden; }
+  .tool > summary {
+    list-style: none; cursor: pointer; padding: 5px 10px; font-size: 12px;
+    display: flex; align-items: baseline; gap: 7px; color: var(--muted);
+  }
+  .tool > summary::-webkit-details-marker { display: none; }
+  .tool > summary::before { content: '▸'; font-size: 10px; color: var(--muted); flex: none; }
+  .tool[open] > summary::before { content: '▾'; }
+  .tool .tname { color: var(--text); font-weight: 600; flex: none; }
+  .tool .tdetail {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .tool.err > summary .tname { color: #f85149; }
+  .tool .tbody { border-top: 1px solid var(--border); padding: 8px 10px; }
+  .tool .tbody h6 {
+    margin: 0 0 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted);
+  }
+  .tool .tbody h6 + pre { margin-top: 0; }
+  .tool .tbody pre + h6 { margin-top: 10px; }
+  .tool pre {
+    margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; font-size: 11.5px; line-height: 1.45; max-height: 320px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word;
+  }
   /* Interactive question card — renders an AskUserQuestion's options as
      clickable choices so a headless turn's prompt doesn't dead-end. */
   .askcard { border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; margin-top: 8px; background: var(--panel2); }
@@ -981,8 +1009,7 @@ function renderStreaming(partial) {
   const body = document.getElementById('chatBody');
   if (!body) return;
   const ph = body.querySelector('.empty'); if (ph) ph.remove();
-  const toolLine = partial.tools && partial.tools.length
-    ? `<div class="tooluse">⚙ ${partial.tools.map(esc).join(' · ')}</div>` : '';
+  const toolLine = renderTools(partial.tools);
   const textHtml = partial.text
     ? `<div class="bubble">${md(partial.text)}</div>`
     : (toolLine ? '' : `<div class="bubble"><span class="typing">▍</span></div>`);
@@ -1082,11 +1109,28 @@ async function loadTranscript(reset) {
   } catch (e) { /* transient */ }
 }
 
+// Render tool calls as expandable blocks. Each tool is {name, detail, body,
+// output, error}; older transcripts may still hold bare name strings, so coerce.
+function renderTools(list) {
+  const tools = (list || [])
+    .map(t => typeof t === 'string' ? { name: t } : t)
+    .filter(t => t && t.name !== 'AskUserQuestion');
+  if (!tools.length) return '';
+  const rows = tools.map(t => {
+    const detail = t.detail ? `<span class="tdetail">${esc(t.detail)}</span>` : '';
+    const hasBody = t.body || t.output;
+    const head = `<summary><span class="tname">${esc(t.name)}</span>${detail}</summary>`;
+    if (!hasBody) return `<details class="tool${t.error ? ' err' : ''}">${head}</details>`;
+    const input = t.body ? `<h6>Input</h6><pre>${esc(t.body)}</pre>` : '';
+    const output = t.output ? `<h6>Output</h6><pre>${esc(t.output)}</pre>` : '';
+    return `<details class="tool${t.error ? ' err' : ''}">${head}<div class="tbody">${input}${output}</div></details>`;
+  }).join('');
+  return `<div class="tools">${rows}</div>`;
+}
+
 function renderMsg(m) {
-  // The question card replaces the bare "⚙ AskUserQuestion" line.
-  const shown = (m.tools || []).filter(t => t !== 'AskUserQuestion');
-  const tools = shown.length
-    ? `<div class="tooluse">⚙ ${shown.map(esc).join(' · ')}</div>` : '';
+  // The question card replaces the bare "AskUserQuestion" tool row.
+  const tools = renderTools(m.tools);
   const text = m.text ? `<div class="bubble">${md(m.text)}</div>` : '';
   const ask = m.ask ? renderAsk(m.ask) : '';
   return `<div class="msg ${m.role}">
