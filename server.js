@@ -51,6 +51,7 @@ function parseSessionFile(filePath, stat) {
   let contextTokens = 0; // size of the most recent turn's context window
   let lastEventType = null; // 'user' | 'assistant' — last conversational record
   let lastStopReason = null; // stop_reason of the most recent assistant turn
+  let permissionMode = null; // permission mode the most recent turn ran under
 
   const content = fs.readFileSync(filePath, 'utf8');
   for (const line of content.split('\n')) {
@@ -59,6 +60,7 @@ function parseSessionFile(filePath, stat) {
     try { o = JSON.parse(line); } catch { continue; }
 
     if (o.sessionId && !sessionId) sessionId = o.sessionId;
+    if (o.permissionMode) permissionMode = o.permissionMode;
     if (o.cwd) cwd = o.cwd;
     if (o.gitBranch) gitBranch = o.gitBranch;
     if (o.version) version = o.version;
@@ -123,6 +125,7 @@ function parseSessionFile(filePath, stat) {
     contextTokens,
     lastEventType,
     lastStopReason,
+    permissionMode,
     firstTs,
     lastTs,
     mtimeMs: stat.mtimeMs,
@@ -265,6 +268,10 @@ function buildData() {
     p.sessions.forEach((s, i) => {
       s.likelyLive = p.liveTerminals > 0 && i < p.liveTerminals;
       s.status = computeStatus(s);
+      // Permission mode: what the next ClaudeNav turn will run under, and
+      // whether the user pinned it (vs. inherited from the transcript).
+      s.modeOverride = sessionModes.get(s.sessionId) || null;
+      s.mode = s.modeOverride || s.permissionMode || 'bypassPermissions';
       // Confident tab mapping only when the folder has a single live terminal.
       s.inputTty = (p.liveTerminals === 1 && i === 0) ? p.liveTtys[0] : null;
     });
@@ -491,6 +498,37 @@ console.log(`[claudenav] using claude binary: ${CLAUDE_BIN}`);
 // (matches how these terminal sessions were started). Set CLAUDE_SAFE=1 to omit.
 const SKIP_PERMS = process.env.CLAUDE_SAFE !== '1';
 
+// Permission modes the `claude` CLI accepts via --permission-mode. ClaudeNav
+// lets you pick one per session; the next headless turn runs under it (and the
+// transcript then records it, so the choice "sticks" even without the override).
+const PERMISSION_MODES = ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'];
+
+// User-chosen mode overrides, sessionId -> mode. Persisted so a chosen mode
+// survives a restart. When unset, a turn falls back to the transcript's last
+// recorded mode, else 'bypassPermissions' (ClaudeNav's historical default).
+const MODES_FILE = path.join(os.homedir(), '.claude', 'claudenav-modes.json');
+const sessionModes = new Map();
+try {
+  const raw = JSON.parse(fs.readFileSync(MODES_FILE, 'utf8'));
+  for (const [k, v] of Object.entries(raw)) if (PERMISSION_MODES.includes(v)) sessionModes.set(k, v);
+} catch { /* no file yet */ }
+function persistModes() {
+  try { fs.writeFileSync(MODES_FILE, JSON.stringify(Object.fromEntries(sessionModes))); } catch {}
+}
+function setSessionMode(sessionId, mode) {
+  if (!/^[\w-]+$/.test(sessionId || '')) throw new Error('bad session id');
+  if (!PERMISSION_MODES.includes(mode)) throw new Error('unknown mode');
+  sessionModes.set(sessionId, mode);
+  persistModes();
+}
+// The mode a turn for this session will actually run under.
+function effectiveMode(sessionId) {
+  if (sessionModes.has(sessionId)) return sessionModes.get(sessionId);
+  const fp = findSessionFile(sessionId);
+  if (fp) { try { return parseSessionFile(fp, fs.statSync(fp)).permissionMode || 'bypassPermissions'; } catch {} }
+  return 'bypassPermissions';
+}
+
 const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_TURN_TIMEOUT_MS) || 15 * 60 * 1000;
 
 const runningChats = new Map(); // sessionId -> { child, startedAt, timer, killed }
@@ -577,7 +615,15 @@ function drainQueue(sessionId) {
   const exists = findSessionFile(sessionId);
   const base = exists ? ['--resume', sessionId] : ['--session-id', sessionId];
   const args = [...base, '-p', text, '--output-format', 'stream-json', '--verbose'];
-  if (SKIP_PERMS) args.push('--dangerously-skip-permissions');
+  // Permission mode: bypassPermissions keeps the historical skip-flag behavior
+  // (honoring CLAUDE_SAFE); any other mode is passed through to the CLI.
+  const mode = effectiveMode(sessionId);
+  if (mode === 'bypassPermissions') {
+    if (SKIP_PERMS) args.push('--dangerously-skip-permissions');
+    else args.push('--permission-mode', 'default');
+  } else {
+    args.push('--permission-mode', mode);
+  }
 
   const child = spawn(CLAUDE_BIN, args, { cwd });
   livePartial.set(sessionId, { text: '', tools: [], updatedAt: Date.now() });
@@ -1079,6 +1125,16 @@ const server = http.createServer((req, res) => {
         sendJSON(res, 200, { ok: true, ...info });
       });
     }, 80 * 1024 * 1024); // allow pasted images
+  }
+
+  if (url.pathname === '/api/session-mode' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      try {
+        setSessionMode(body.session, body.mode);
+        return sendJSON(res, 200, { ok: true, session: body.session, mode: body.mode });
+      } catch (e) { return sendJSON(res, 400, { error: e.message }); }
+    });
   }
 
   if (url.pathname.startsWith('/uploads/')) {

@@ -56,6 +56,12 @@ under launchd's minimal environment.
   the CLI doesn't stream tokens) or `null`.
 - `POST /api/chat-cancel {session}` — SIGTERM the running turn (marked so it
   isn't logged as an error) and drop anything queued behind it.
+- `POST /api/session-mode {session, mode}` — pin the permission mode the next
+  headless turn runs under (`default`/`plan`/`acceptEdits`/`auto`/
+  `bypassPermissions`/`dontAsk`). Persisted to `~/.claude/claudenav-modes.json`.
+  Each session in `/api/sessions` carries `permissionMode` (the mode of its last
+  recorded turn), `modeOverride` (the pinned value, or null), and `mode` (the
+  effective mode = override ?? last transcript mode ?? `bypassPermissions`).
 - `POST /api/commit {cwd, message}` / `POST /api/push {cwd}` — git, restricted
   to known-session directories.
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
@@ -74,8 +80,12 @@ under launchd's minimal environment.
 
 ## Conventions / gotchas
 
-- Headless turns run with `--dangerously-skip-permissions` (set `CLAUDE_SAFE=1`
-  to drop). `CLAUDE_BIN` overrides the `claude` path.
+- Headless turns default to the `bypassPermissions` mode, spawned with
+  `--dangerously-skip-permissions` (set `CLAUDE_SAFE=1` to drop it — bypass then
+  degrades to `--permission-mode default`). Any other per-session mode (see
+  `/api/session-mode`) is passed through as `--permission-mode <mode>`; `plan`
+  is read-only (Claude proposes a plan without making changes). `CLAUDE_BIN`
+  overrides the `claude` path.
 - **Finding `claude`**: `resolveClaudeBin()` honors `CLAUDE_BIN`, else trusts
   `command -v claude`, else probes known install dirs (`~/.local/bin`,
   `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`). This is
