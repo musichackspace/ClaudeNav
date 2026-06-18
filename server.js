@@ -588,7 +588,11 @@ process.on('SIGTERM', shutdown);
 // ---------------------------------------------------------------------------
 
 function git(cwd, args) {
-  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+  // stdio[2]='pipe' captures git's stderr onto the thrown error instead of
+  // letting it leak to our stdout/stderr (which the LaunchAgent tees to the
+  // log). Expected failures here — a branch with no upstream (`@{u}`), a
+  // non-repo dir — are caught by callers, so without this they'd spam the log.
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 // ---------------------------------------------------------------------------
