@@ -356,6 +356,7 @@ function buildData() {
       // whether the user pinned it (vs. inherited from the transcript).
       s.modeOverride = sessionModes.get(s.sessionId) || null;
       s.mode = s.modeOverride || s.permissionMode || 'bypassPermissions';
+      s.archived = archivedSessions.has(s.sessionId);
       // Confident tab mapping only when the folder has a single live terminal.
       s.inputTty = (p.liveTerminals === 1 && i === 0) ? p.liveTtys[0] : null;
     });
@@ -598,6 +599,21 @@ try {
 } catch { /* no file yet */ }
 function persistModes() {
   try { fs.writeFileSync(MODES_FILE, JSON.stringify(Object.fromEntries(sessionModes))); } catch {}
+}
+
+// Archived sessions: explicitly tucked away by the user, hidden from the default
+// list regardless of recency/status (they stay searchable and resumable). Just a
+// set of session IDs persisted alongside the modes file.
+const ARCHIVE_FILE = path.join(os.homedir(), '.claude', 'claudenav-archived.json');
+const archivedSessions = new Set();
+try {
+  const raw = JSON.parse(fs.readFileSync(ARCHIVE_FILE, 'utf8'));
+  if (Array.isArray(raw)) for (const id of raw) if (typeof id === 'string') archivedSessions.add(id);
+} catch { /* no file yet */ }
+function setArchived(sessionId, archived) {
+  if (!/^[\w-]+$/.test(sessionId || '')) throw new Error('bad session id');
+  if (archived) archivedSessions.add(sessionId); else archivedSessions.delete(sessionId);
+  try { fs.writeFileSync(ARCHIVE_FILE, JSON.stringify([...archivedSessions])); } catch {}
 }
 function setSessionMode(sessionId, mode) {
   if (!/^[\w-]+$/.test(sessionId || '')) throw new Error('bad session id');
@@ -1380,6 +1396,17 @@ const server = http.createServer((req, res) => {
       try {
         setSessionMode(body.session, body.mode);
         return sendJSON(res, 200, { ok: true, session: body.session, mode: body.mode });
+      } catch (e) { return sendJSON(res, 400, { error: e.message }); }
+    });
+  }
+
+  if (url.pathname === '/api/archive' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      try {
+        const archived = body.archived !== false; // default true; pass false to unarchive
+        setArchived(body.session, archived);
+        return sendJSON(res, 200, { ok: true, session: body.session, archived });
       } catch (e) { return sendJSON(res, 400, { error: e.message }); }
     });
   }

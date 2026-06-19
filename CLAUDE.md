@@ -64,6 +64,12 @@ under launchd's minimal environment.
   effective mode = override ?? last transcript mode ?? `bypassPermissions`).
 - `POST /api/commit {cwd, message}` / `POST /api/push {cwd}` — git, restricted
   to known-session directories.
+- `POST /api/archive {session, archived}` — tuck a session away (or restore it
+  with `archived:false`). Hidden from the default list regardless of
+  recency/status, but stays searchable and resumable. Persisted to
+  `~/.claude/claudenav-archived.json` (a flat array of session IDs); each session
+  in `/api/sessions` carries an `archived` boolean. The UI's "Show archived"
+  toggle reveals them so you can unarchive.
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
 - `POST /api/assess {session}` — AI "is it safe to wrap?" (adds a turn).
 - `POST /api/handover {session}` — for a context-heavy session: have it write a

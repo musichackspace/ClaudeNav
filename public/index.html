@@ -96,6 +96,9 @@
   .pill.waiting { background: rgba(63,185,80,.16); color: var(--live); }
   .pill.interrupted { background: rgba(248,81,73,.16); color: #f85149; }
   .pill.idle { background: var(--chip); color: var(--muted); }
+  .pill.archived-tag { background: var(--chip); color: var(--muted); border: 1px dashed var(--border); }
+  .session.archived { opacity: .55; }
+  .session.archived:hover { opacity: .8; }
   .pill.working::before {
     content: '●'; margin-right: 5px; animation: pulse 1.2s ease-in-out infinite;
   }
@@ -374,6 +377,7 @@
     </select>
   </label>
   <label class="meta" title="By default the dashboard shows sessions active in the last 3 days (any status); older ones are collapsed. Tick to show them all. They stay searchable regardless."><input type="checkbox" id="showStale" /> Show older</label>
+  <label class="meta" title="Archived sessions are hidden from the list (they stay searchable and resumable). Tick to show them so you can unarchive."><input type="checkbox" id="showArchived" /> Show archived</label>
   <span id="usage" class="usage" hidden></span>
   <span id="lights" class="lights"></span>
   <button id="updateBtn" class="update-btn" hidden></button>
@@ -480,6 +484,9 @@ function modeOf(s) { return (s && s.mode) || 'bypassPermissions'; }
 // regardless. (This replaces the old status-based "Hide idle", which hid recent
 // finished sessions you cared about while leaving stale ones on screen.)
 let showStale = localStorage.getItem('cn-show-stale') === '1';
+// Archived sessions (user tucked them away on the server) are hidden until this
+// is ticked. Persisted server-side; this toggle just reveals them to unarchive.
+let showArchived = localStorage.getItem('cn-show-archived') === '1';
 const STALE_MS = 3 * 24 * 60 * 60 * 1000;
 function isStale(s) {
   // Never collapse a live/working session; otherwise purely age-based.
@@ -570,10 +577,18 @@ function render() {
   let html = '';
   let shown = 0;
   let hiddenStale = 0;
+  let hiddenArchived = 0;
 
   for (const p of DATA.projects) {
     const sessions = p.sessions.filter(s => {
       if (!matchesQuery(s, p, q)) return false;
+      // Archived: hidden until "Show archived" (or a search) reveals them. Takes
+      // precedence over the recency cutoff so an archived session shows once,
+      // regardless of age.
+      if (s.archived) {
+        if (searching || showArchived) return true;
+        hiddenArchived++; return false;
+      }
       // Sessions older than the recency window are collapsed out of the default
       // view but stay searchable — a search query overrides the age cutoff.
       if (!searching && !showStale && isStale(s)) { hiddenStale++; return false; }
@@ -623,9 +638,10 @@ function render() {
                title="Hand over: writes a handoff brief, then opens a NEW session seeded with it. Fresh context, full continuity — continue work there and wrap this one up.">Hand over ▸</button>
            </div>`
         : '';
-      html += `<div class="session" data-session="${esc(s.sessionId)}" title="Click to view conversation">
+      html += `<div class="session${s.archived ? ' archived' : ''}" data-session="${esc(s.sessionId)}" title="Click to view conversation">
         <span class="light ${s.status}" title="${STATUS_LABEL[s.status] || s.status}"></span>
         <span class="pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
+        ${s.archived ? '<span class="pill archived-tag">Archived</span>' : ''}
         <div class="s-main">
           <div class="s-title">${esc(s.title)} <span class="mode-badge ${modeOf(s) === 'plan' ? 'plan' : ''}" title="Permission mode for the next ClaudeNav turn${s.modeOverride ? ' (pinned)' : ''}">${esc(MODE_LABEL[modeOf(s)] || modeOf(s))}</span></div>
           <div class="s-sub">${s.gitBranch ? '⎇ ' + esc(s.gitBranch) + ' · ' : ''}${esc(s.lastPrompt) || '<em>no prompt</em>'}</div>
@@ -641,6 +657,7 @@ function render() {
           <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}">Resume ▸</button>
           <button data-copy="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}" title="Copy resume command">⧉</button>
           <button data-link="${esc(s.sessionId)}" title="Copy a link that opens this session">🔗</button>
+          <button data-archive="${esc(s.sessionId)}" data-archived="${s.archived ? '1' : '0'}" title="${s.archived ? 'Unarchive — show this session in the normal list again' : 'Archive — hide this session from the list (stays searchable and resumable)'}">${s.archived ? '⤴ Unarchive' : '🗄'}</button>
         </div>
       </div>`;
     }
@@ -650,12 +667,17 @@ function render() {
   if (hiddenStale) {
     html += `<div class="stale-note">${hiddenStale} older session${hiddenStale > 1 ? 's' : ''} (not touched in 3+ days) hidden — <a id="revealStale">show older</a> or search to find ${hiddenStale > 1 ? 'them' : 'it'}.</div>`;
   }
+  if (hiddenArchived) {
+    html += `<div class="stale-note">${hiddenArchived} archived session${hiddenArchived > 1 ? 's' : ''} hidden — <a id="revealArchived">show archived</a> or search.</div>`;
+  }
 
   const emptyMsg = q
     ? 'No sessions match your search.'
     : hiddenStale
       ? `Nothing active in the last 3 days — ${hiddenStale} older session${hiddenStale > 1 ? 's are' : ' is'} hidden. <a id="revealStale">Show older</a> or search.`
-      : 'No sessions.';
+      : hiddenArchived
+        ? `Nothing active — ${hiddenArchived} archived session${hiddenArchived > 1 ? 's are' : ' is'} hidden. <a id="revealArchived">Show archived</a> or search.`
+        : 'No sessions.';
   root.innerHTML = shown ? html : `<div class="empty">${emptyMsg}</div>`;
   document.getElementById('status').textContent =
     `${DATA.projects.length} projects · updated ${new Date(DATA.generatedAt).toLocaleTimeString()}`;
@@ -715,6 +737,7 @@ document.getElementById('folders').addEventListener('click', e => {
 
 document.getElementById('content').addEventListener('click', e => {
   if (e.target.id === 'revealStale') { setShowStale(true); return; }
+  if (e.target.id === 'revealArchived') { setShowArchived(true); return; }
   const btn = e.target.closest('button');
   if (btn) {
     if (btn.dataset.collapse !== undefined) {
@@ -734,6 +757,7 @@ document.getElementById('content').addEventListener('click', e => {
       navigator.clipboard.writeText(url).then(() => toast('Link copied: ' + url));
     }
     else if (btn.dataset.viz) openViz(btn.dataset.viz, btn.dataset.vizname || btn.dataset.viz);
+    else if (btn.dataset.archive !== undefined) { e.stopPropagation(); doArchive(btn.dataset.archive, btn.dataset.archived !== '1'); }
     return;
   }
   const row = e.target.closest('.session');
@@ -1676,6 +1700,17 @@ async function api(path, payload) {
   return j;
 }
 
+async function doArchive(sessionId, archived) {
+  try {
+    await api('/api/archive', { session: sessionId, archived });
+    // Reflect immediately without waiting for the next poll.
+    for (const p of DATA.projects) for (const s of p.sessions)
+      if (s.sessionId === sessionId) s.archived = archived;
+    toast(archived ? 'Session archived' : 'Session unarchived');
+    render();
+  } catch (e) { toast('Archive failed: ' + e.message, true); }
+}
+
 async function doCommit(cwd, name) {
   const msg = prompt(`Commit message for ${name}:`, 'checkpoint (ClaudeNav wrap-up)');
   if (msg === null) return;
@@ -1758,6 +1793,15 @@ function setShowStale(v) {
 }
 showStaleBox.checked = showStale;
 showStaleBox.addEventListener('change', () => setShowStale(showStaleBox.checked));
+const showArchivedBox = document.getElementById('showArchived');
+function setShowArchived(v) {
+  showArchived = v;
+  showArchivedBox.checked = v;
+  localStorage.setItem('cn-show-archived', v ? '1' : '0');
+  render();
+}
+showArchivedBox.checked = showArchived;
+showArchivedBox.addEventListener('change', () => setShowArchived(showArchivedBox.checked));
 setFavicon(LIGHT_COLORS.idle);
 // Auto-refresh every 5s so live terminals stay current.
 timer = setInterval(load, 5000);
