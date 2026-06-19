@@ -226,21 +226,23 @@ function looksLikeClosingAck(text) {
 // Does the assistant's final message actually put the ball in your court? An
 // end_turn alone doesn't mean "your turn" — most completed work ends with a
 // statement ("Done.", "Pushed PR #10."), which expects nothing back. We only
-// call it your turn when the closing message asks a question or offers a choice.
-// This is the line between "Your turn" and "idle/done" for a finished turn.
+// call it your turn when the closing message *ends on a question*.
+//
+// We require the question mark to TERMINATE the message (or its last line), not
+// just appear somewhere in it. Sign-offs routinely contain "want me to" / "do
+// you want" used conditionally ("Flag me if you want me to…", "Want me to X?
+// Otherwise we're done.") — keying off those phrases lit finished work up as
+// "your turn", which was the main false-positive source. A genuine open question
+// ends with "?"; a sign-off ends with a period.
 function awaitsUserReply(text) {
   if (!text) return false;
-  // Look at the closing thought: the last non-empty line, plus the final
-  // sentence of the whole message (a trailing question can sit on its own line
-  // or end a paragraph).
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const lastLine = lines[lines.length - 1] || '';
-  // Ends on a question mark (ignoring trailing markdown/emoji/closing brackets).
-  const endsQ = /[?？]["'’”)\]*_`~\s]*$/.test(text.trim());
-  const lastLineQ = /[?？]["'’”)\]*_`~\s]*$/.test(lastLine);
-  // Explicit offers / requests for a decision, in the closing line.
-  const offer = /\b(want me to|would you like|do you want|should i\b|shall i\b|shall we|should we|let me know (which|if you|whether)|which (one|option|approach|of these)|ready for me to|do you prefer|which would you)\b/i.test(lastLine);
-  return endsQ || lastLineQ || offer;
+  const trimmed = text.trim();
+  // Closing line, ignoring a short trailing parenthetical aside such as
+  // "Want me to commit? (takes a second)".
+  const lastLine = (trimmed.split('\n').map(l => l.trim()).filter(Boolean).pop() || '')
+    .replace(/\s*\([^()]{0,80}\)[.!\s]*$/, '');
+  const endsInQ = /[?？]["'’”)\]*_`~\s]*$/;
+  return endsInQ.test(trimmed) || endsInQ.test(lastLine);
 }
 
 // Classify a session's state from its tail records + liveness.
@@ -255,7 +257,10 @@ function awaitsUserReply(text) {
 //   idle         — done/parked: a finished turn that expects nothing back (work
 //                  delivered, wrap confirmed, a sign-off), or a user sign-off ack.
 //                  Most completed sessions land here.
-//   interrupted  — mid-turn and untouched for 30+ min: genuinely left half-done.
+//   interrupted  — a turn that was cut off mid-flight *recently* (last 30 min):
+//                  worth jumping back into now. An old mid-turn isn't "interrupted",
+//                  it's just abandoned → idle. (Alarming on hours/days-old cut-offs
+//                  was the main interrupted false-positive source.)
 function computeStatus(s) {
   // A turn this server is running (or has queued) for the session counts as live,
   // even when ps+lsof can't see a terminal for it (headless / IDE / remote).
@@ -265,7 +270,7 @@ function computeStatus(s) {
 
   const recentMs = Date.now() - (s.mtimeMs || 0);
   const activelyWriting = recentMs < 90 * 1000;     // transcript written in last 90s
-  const longAbandoned = recentMs > 30 * 60 * 1000;  // mid-turn, untouched 30 min+
+  const recentlyCutOff = recentMs < 30 * 60 * 1000; // mid-turn within the last 30 min
   // end_turn / stop_sequence are clean turn endings; tool_use / null mean the turn
   // was cut off mid-flight (a tool call with no follow-up recorded).
   const cleanlyEnded = s.lastStopReason === 'end_turn' || s.lastStopReason === 'stop_sequence';
@@ -283,9 +288,9 @@ function computeStatus(s) {
     // A real in-progress turn writes blocks continuously, so a recent transcript
     // write is the only trustworthy signal. (serverActive, above, covers headless.)
     if (activelyWriting) return 'working';
-    if (longAbandoned) return 'interrupted';  // really left half-done → needs you
-    // Parked mid-turn but recent: a turn is probably still resolving, or you just
-    // stepped away. Don't alarm and don't claim it's your turn — it's Claude's.
+    // Cut off in the last half hour → still warm, flag it to resume. Older than
+    // that, it's just parked — don't keep raising a red flag for days.
+    if (recentlyCutOff) return 'interrupted';
     return 'idle';
   }
   // Assistant finished cleanly. Your turn ONLY if it actually asked you something;
