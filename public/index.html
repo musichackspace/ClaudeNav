@@ -372,8 +372,7 @@
       <option value="iTerm">iTerm</option>
     </select>
   </label>
-  <label class="meta"><input type="checkbox" id="hideIdle" /> Hide idle</label>
-  <label class="meta" title="Idle sessions untouched for 7+ days are hidden by default; tick to show them. They stay searchable regardless."><input type="checkbox" id="showStale" /> Show older</label>
+  <label class="meta" title="By default the dashboard shows sessions active in the last 3 days (any status); older ones are collapsed. Tick to show them all. They stay searchable regardless."><input type="checkbox" id="showStale" /> Show older</label>
   <span id="usage" class="usage" hidden></span>
   <span id="lights" class="lights"></span>
   <button id="updateBtn" class="update-btn" hidden></button>
@@ -474,17 +473,16 @@ const STATUS_LABEL = { working: 'Working', waiting: 'Your turn', interrupted: 'I
 const MODE_LABEL = { default: 'Default', plan: 'Plan', acceptEdits: 'Accept edits', auto: 'Auto', bypassPermissions: 'Bypass', dontAsk: "Don't ask" };
 const MODE_CHOICES = ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'];
 function modeOf(s) { return (s && s.mode) || 'bypassPermissions'; }
-// Hide idle (finished/parked) sessions, remembered across refreshes.
-let hideIdle = localStorage.getItem('cn-hide-idle') === '1';
-// By default, collapse sessions untouched for 7+ days out of the main list
-// (they stay searchable). "Show older" reveals them; remembered across refreshes.
-// Includes old "Your turn" sessions: an unanswered turn stays your turn forever,
-// but after a week it shouldn't crowd the live view — fold it away like idle.
+// Recency-first view: by default show sessions touched in the last 3 days
+// (ANY status) and collapse everything older — what's recent matters more than
+// what state it's in. "Show older" reveals the rest; they stay searchable
+// regardless. (This replaces the old status-based "Hide idle", which hid recent
+// finished sessions you cared about while leaving stale ones on screen.)
 let showStale = localStorage.getItem('cn-show-stale') === '1';
-const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+const STALE_MS = 3 * 24 * 60 * 60 * 1000;
 function isStale(s) {
-  return (s.status === 'idle' || s.status === 'waiting')
-    && (Date.now() - (s.mtimeMs || 0)) > STALE_MS;
+  // Never collapse a live/working session; otherwise purely age-based.
+  return s.status !== 'working' && (Date.now() - (s.mtimeMs || 0)) > STALE_MS;
 }
 // Context-fill thresholds (% of the model's window) that prompt token-hygiene UX.
 const CTX_WARN = 60, CTX_HOT = 85;
@@ -575,9 +573,8 @@ function render() {
   for (const p of DATA.projects) {
     const sessions = p.sessions.filter(s => {
       if (!matchesQuery(s, p, q)) return false;
-      if (hideIdle && s.status === 'idle') return false;
-      // Old idle sessions are collapsed out of the default view but stay
-      // searchable — a search query overrides the age cutoff.
+      // Sessions older than the recency window are collapsed out of the default
+      // view but stay searchable — a search query overrides the age cutoff.
       if (!searching && !showStale && isStale(s)) { hiddenStale++; return false; }
       return true;
     });
@@ -650,14 +647,14 @@ function render() {
   }
 
   if (hiddenStale) {
-    html += `<div class="stale-note">${hiddenStale} session${hiddenStale > 1 ? 's' : ''} untouched for 7+ days hidden — <a id="revealStale">show older</a> or search to find ${hiddenStale > 1 ? 'them' : 'it'}.</div>`;
+    html += `<div class="stale-note">${hiddenStale} older session${hiddenStale > 1 ? 's' : ''} (not touched in 3+ days) hidden — <a id="revealStale">show older</a> or search to find ${hiddenStale > 1 ? 'them' : 'it'}.</div>`;
   }
 
   const emptyMsg = q
     ? 'No sessions match your search.'
     : hiddenStale
-      ? `No active sessions — ${hiddenStale} older session${hiddenStale > 1 ? 's are' : ' is'} hidden. <a id="revealStale">Show older</a> or search.`
-      : (hideIdle ? 'No active sessions — idle sessions are hidden.' : 'No sessions.');
+      ? `Nothing active in the last 3 days — ${hiddenStale} older session${hiddenStale > 1 ? 's are' : ' is'} hidden. <a id="revealStale">Show older</a> or search.`
+      : 'No sessions.';
   root.innerHTML = shown ? html : `<div class="empty">${emptyMsg}</div>`;
   document.getElementById('status').textContent =
     `${DATA.projects.length} projects · updated ${new Date(DATA.generatedAt).toLocaleTimeString()}`;
@@ -666,9 +663,11 @@ function render() {
 }
 
 function renderLightSummary() {
+  // Count only recent (non-collapsed) sessions — the summary is about what needs
+  // attention now, not questions you walked away from weeks ago.
   const counts = { working: 0, waiting: 0, interrupted: 0 };
   for (const p of DATA.projects) for (const s of p.sessions)
-    if (counts[s.status] !== undefined) counts[s.status]++;
+    if (counts[s.status] !== undefined && !isStale(s)) counts[s.status]++;
   const parts = [];
   if (counts.working) parts.push(`<span class="l"><span class="light working"></span>${counts.working} working</span>`);
   if (counts.waiting) parts.push(`<span class="l"><span class="light waiting"></span>${counts.waiting} ready</span>`);
@@ -1733,13 +1732,6 @@ document.getElementById('vizOverlay').addEventListener('click', e => { if (e.tar
 document.getElementById('search').addEventListener('input', render);
 document.getElementById('refresh').addEventListener('click', load);
 document.getElementById('updateBtn').addEventListener('click', doUpdate);
-const hideIdleBox = document.getElementById('hideIdle');
-hideIdleBox.checked = hideIdle;
-hideIdleBox.addEventListener('change', () => {
-  hideIdle = hideIdleBox.checked;
-  localStorage.setItem('cn-hide-idle', hideIdle ? '1' : '0');
-  render();
-});
 const showStaleBox = document.getElementById('showStale');
 function setShowStale(v) {
   showStale = v;
