@@ -406,6 +406,20 @@ function appleScriptFor(appName, shellCmd) {
   ].join('\n');
 }
 
+// Open a URL in the system default browser. The chat routes web-link clicks
+// through here so they land in the user's real browser rather than navigating
+// the ClaudeNav tab/webview itself. http/https only.
+function openUrl(rawUrl, cb) {
+  let u;
+  try { u = new URL(String(rawUrl)); } catch { return cb(new Error('bad url')); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return cb(new Error('unsupported scheme'));
+  const cmd = process.platform === 'darwin' ? 'open'
+    : process.platform === 'win32' ? 'cmd'
+    : 'xdg-open';
+  const args = process.platform === 'win32' ? ['/c', 'start', '', u.href] : [u.href];
+  execFile(cmd, args, (err) => err ? cb(new Error(err.message)) : cb(null, { opened: u.href }));
+}
+
 function openTerminal({ cwd, sessionId, app }, cb) {
   if (!cwd) return cb(new Error('missing cwd'));
   const shellCmd = buildShellCommand({ cwd, sessionId });
@@ -1521,6 +1535,16 @@ const server = http.createServer((req, res) => {
     return readBody(req, (err, body) => {
       if (err) return sendJSON(res, 400, { error: 'bad json' });
       chatCancel(body.session, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/open-url' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      openUrl(body.url, (e, info) => {
         if (e) return sendJSON(res, 400, { error: e.message });
         sendJSON(res, 200, { ok: true, ...info });
       });

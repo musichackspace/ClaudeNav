@@ -235,6 +235,15 @@
   .bubble { padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--border); }
   .msg.assistant .bubble { border-color: transparent; padding-left: 0; }
   .tooluse { color: var(--muted); font-size: 12px; font-style: italic; }
+  .bubble a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+  .bubble a:hover { filter: brightness(1.15); }
+  /* Session references render as a clickable chip that opens the session in-app. */
+  .bubble a.slink {
+    text-decoration: none; background: rgba(217,119,87,.14);
+    border: 1px solid rgba(217,119,87,.35); border-radius: 5px; padding: 0 5px;
+    font-size: .9em; white-space: nowrap;
+  }
+  .bubble a.slink::before { content: '⧉ '; opacity: .75; }
   /* Expandable tool calls — collapsed shows name + one-line detail; click to
      reveal the full input and the tool's output. */
   .tools { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
@@ -498,6 +507,36 @@ function shortModel(m) {
   return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '').replace(/\[1m\]$/, ' 1M');
 }
 
+// Known session ids, refreshed from /api/sessions — lets the renderer linkify a
+// session reference only when it actually resolves to a session we can open.
+let KNOWN_SESSIONS = new Set();
+function refreshKnownSessions() {
+  const set = new Set();
+  for (const p of (DATA.projects || [])) for (const s of p.sessions) set.add(s.sessionId);
+  KNOWN_SESSIONS = set;
+}
+function isKnownSession(id) { return KNOWN_SESSIONS.has(id); }
+
+// If an href points back into this ClaudeNav (claudenav:<id>, or our own origin
+// with ?session=<id>), return the session id so it opens in-app. Else null.
+function sessionRef(href) {
+  let m = /^claudenav:(?:\/\/)?([\w-]{8,})/.exec(href);
+  if (m) return m[1];
+  if (href.indexOf(location.host) !== -1) {
+    m = /[?&]session=([\w-]{8,})/.exec(href);
+    if (m && isKnownSession(m[1])) return m[1];
+  }
+  return null;
+}
+
+// Build an anchor for a (pre-escaped) href + label. Session links open in-app;
+// everything else is a web link routed to the system browser on click.
+function linkHtml(href, label) {
+  const sid = sessionRef(href);
+  if (sid) return `<a href="#" class="slink" data-session="${esc(sid)}">${label}</a>`;
+  return `<a href="${href}" class="weblink" target="_blank" rel="noopener">${label}</a>`;
+}
+
 // --- Minimal, safe Markdown renderer -----------------------------------------
 function md(src) {
   if (!src) return '';
@@ -513,12 +552,27 @@ function md(src) {
   // 3. Attached-image markers -> <img>.
   src = src.replace(/\[Attached image: ([^\]]+)\]/g, (_, p) =>
     ` IMG${encodeURIComponent(p.split('/').pop())} `);
-  // 4. Inline formatting.
+  // 4. Inline formatting. Links are stashed as opaque ` LNKn ` tokens (like code
+  //    blocks) so the bare-URL autolinker can't re-process an href it already
+  //    wrapped, and so block parsing leaves them intact until the final restore.
+  const links = [];
+  const stash = (html) => ` LNK${links.push(html) - 1} `;
   src = src
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
-    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // [label](url) — http(s) or an in-app claudenav: session link
+    .replace(/\[([^\]]+)\]\(((?:https?|claudenav):[^)\s]+)\)/g, (_, label, href) => stash(linkHtml(href, label)))
+    // Bare URLs — leave trailing sentence punctuation outside the link.
+    .replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g, (_, pre, href) => {
+      let trail = '';
+      const tm = /(?:[.,;:!?)\]]|&quot;|&gt;|&lt;)+$/.exec(href);
+      if (tm) { trail = href.slice(tm.index); href = href.slice(0, tm.index); }
+      return pre + stash(linkHtml(href, href)) + trail;
+    })
+    // Bare session ids we actually know about -> open-in-app links.
+    .replace(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g,
+      (m, id) => isKnownSession(id) ? stash(`<a href="#" class="slink" data-session="${id}">${id}</a>`) : m);
   // 5. Block structure: headings, lists, paragraphs.
   const lines = src.split('\n');
   let html = '', inList = false;
@@ -536,6 +590,7 @@ function md(src) {
   // 6. Restore code blocks and images.
   html = html
     .replace(/ CB(\d+) /g, (_, i) => codeBlocks[+i])
+    .replace(/ LNK(\d+) /g, (_, i) => links[+i])
     .replace(/ IMG([^ ]+) /g, (_, n) =>
       `<a href="/uploads/${n}" target="_blank"><img class="chatimg" src="/uploads/${n}" alt="attachment"></a>`);
   return html;
@@ -1335,7 +1390,31 @@ function renderAsk(ask) {
 
 // Delegated handler for question-card clicks (cards are re-rendered on every
 // poll, so listen once on the persistent chat body).
+// Open a web link in the system default browser via the backend, so it escapes
+// the ClaudeNav tab/webview. Falls back to a plain new tab if the call fails.
+async function openExternal(href) {
+  try {
+    const r = await fetch('/api/open-url', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: href }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'failed');
+  } catch {
+    window.open(href, '_blank', 'noopener');
+  }
+}
+
 document.getElementById('chatBody').addEventListener('click', ev => {
+  const slink = ev.target.closest('a.slink');
+  if (slink) {
+    ev.preventDefault();
+    const id = slink.dataset.session;
+    if (isKnownSession(id)) openChat(id);
+    else toast('That session is no longer available', true);
+    return;
+  }
+  const wlink = ev.target.closest('a.weblink');
+  if (wlink) { ev.preventDefault(); openExternal(wlink.getAttribute('href')); return; }
   const opt = ev.target.closest('.askopt');
   if (opt) {
     const card = opt.closest('.askcard');
@@ -1465,6 +1544,7 @@ async function load() {
   try {
     const r = await fetch('/api/sessions');
     DATA = await r.json();
+    refreshKnownSessions();
     render();
     handleVersion(DATA.version);
     handleUsage(DATA.usage);
