@@ -27,6 +27,60 @@ const UPLOADS_DIR = path.join(os.homedir(), '.claude', 'claudenav-uploads');
 try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch {}
 
 // ---------------------------------------------------------------------------
+// Context window resolution
+//
+// The 1M window is a request-time choice — the model variant `…[1m]`. Transcripts
+// DON'T persist it: they log the plain model id (`claude-opus-4-8`) whether the
+// turn ran on a 200K or 1M window. So we infer each session's window from two
+// real signals, never a guess:
+//   1. Proof — any turn whose context exceeded 200K could only have fit in a 1M
+//      window (output isn't counted, so the input side is a true lower bound on
+//      capacity). This pins heavy sessions exactly.
+//   2. The configured default model variant, for sessions that never crossed
+//      200K (where #1 can't decide). Precedence mirrors the CLI: ANTHROPIC_MODEL
+//      env, then project `.claude/settings.json`, then `~/.claude/settings.json`.
+// The only residual blind spot: a 1M session still under 200K whose config we
+// can't see (e.g. picked via `/model` mid-session) — it reads as 200K until it
+// grows past 200K, then #1 corrects it. Acceptable: it's low-usage either way.
+const STD_WINDOW = 200000, BIG_WINDOW = 1000000;
+
+// Generic mtime-keyed JSON loader (settings files).
+const _jsonCache = new Map(); // path -> { mtimeMs, json }
+function readJson(file) {
+  try {
+    const st = fs.statSync(file);
+    const c = _jsonCache.get(file);
+    if (c && c.mtimeMs === st.mtimeMs) return c.json;
+    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+    _jsonCache.set(file, { mtimeMs: st.mtimeMs, json });
+    return json;
+  } catch { return null; }
+}
+function settingsModel(file) {
+  const j = readJson(file);
+  return (j && j.model) || '';
+}
+function defaultWindowFor(cwd) {
+  // Configured default model variant. We deliberately DON'T read Claude Code's
+  // internal `~/.claude.json` (lastModelUsage) here — its schema isn't a public
+  // contract. The cost is mild: a 1M session still under 200K reads as 200K and
+  // nudges a little early, then proof-by-usage (see contextWindowFor) corrects it
+  // the instant it crosses 200K. The dangerous direction is never config-dependent.
+  const model = process.env.ANTHROPIC_MODEL
+    || (cwd && settingsModel(path.join(cwd, '.claude', 'settings.json')))
+    || settingsModel(path.join(os.homedir(), '.claude', 'settings.json'));
+  return /\[1m\]/.test(model || '') ? BIG_WINDOW : STD_WINDOW;
+}
+// A session's effective window: proven-1M if any turn exceeded 200K, else the
+// configured default for its repo (try the session's own cwd first — a worktree
+// may carry its own .claude/settings.json — then the folded parent project).
+function contextWindowFor(s, parentCwd) {
+  if ((s.peakContextTokens || 0) > STD_WINDOW) return BIG_WINDOW;
+  if (s.cwd && defaultWindowFor(s.cwd) === BIG_WINDOW) return BIG_WINDOW;
+  return defaultWindowFor(parentCwd);
+}
+
+// ---------------------------------------------------------------------------
 // Session parsing (with mtime-keyed cache so repeat scans are cheap)
 // ---------------------------------------------------------------------------
 
@@ -50,6 +104,7 @@ function parseSessionFile(filePath, stat) {
   const models = new Set();
   const tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
   let contextTokens = 0; // size of the most recent turn's context window
+  let peakContextTokens = 0; // largest context any turn reached (window proof)
   let lastEventType = null; // 'user' | 'assistant' — last conversational record
   let lastStopReason = null; // stop_reason of the most recent assistant turn
   let permissionMode = null; // permission mode the most recent turn ran under
@@ -125,6 +180,7 @@ function parseSessionFile(filePath, stat) {
           contextTokens = (u.input_tokens || 0)
             + (u.cache_read_input_tokens || 0)
             + (u.cache_creation_input_tokens || 0);
+          if (contextTokens > peakContextTokens) peakContextTokens = contextTokens;
         }
         break;
       }
@@ -144,6 +200,7 @@ function parseSessionFile(filePath, stat) {
     models: [...models],
     tokens,
     contextTokens,
+    peakContextTokens,
     lastEventType,
     lastStopReason,
     permissionMode,
@@ -352,6 +409,8 @@ function buildData() {
     p.sessions.forEach((s, i) => {
       s.likelyLive = p.liveTerminals > 0 && i < p.liveTerminals;
       s.status = computeStatus(s);
+      // Effective context window (200K vs proven/configured 1M) for fill %.
+      s.contextWindow = contextWindowFor(s, p.cwd);
       // Permission mode: what the next ClaudeNav turn will run under, and
       // whether the user pinned it (vs. inherited from the transcript).
       s.modeOverride = sessionModes.get(s.sessionId) || null;
