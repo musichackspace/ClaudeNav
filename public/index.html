@@ -629,8 +629,8 @@ function render() {
         </div>
         <div class="s-meta ${tier}" title="${tokTip}">
           ${timeAgo(s.mtimeMs)} · ${s.userMsgCount} msgs<br>
-          <span class="tok">↓${fmtTok(t.output)} out</span> ·
-          <span class="tok">${fmtTok(s.contextTokens)} ctx</span>
+          <span class="tok" title="Total tokens this session has generated over its whole life (cumulative across ${s.userMsgCount} turns) — NOT the current context size.">↓${fmtTok(t.output)} generated</span> ·
+          <span class="tok" title="Current context re-sent every turn — ${ctxPct}% of the ${win === CTX_WINDOW ? '200K' : '1M'} window.">${fmtTok(s.contextTokens)}/${win === CTX_WINDOW ? '200K' : '1M'} ctx · ${ctxPct}%</span>
           <span class="ctxbar ${tier}"><i style="width:${ctxPct}%"></i></span>
         </div>
         <div class="s-actions">
