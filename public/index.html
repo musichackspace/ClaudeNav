@@ -349,6 +349,36 @@
     color: var(--text); font-size: 13px; line-height: 1; cursor: pointer;
   }
 
+  /* Current-work dashboard */
+  .dash { width: min(820px, 95%); }
+  .dash-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 4px; }
+  .dash-stat {
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; min-width: 92px; flex: 1;
+  }
+  .dash-stat b { font-size: 22px; display: block; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .dash-stat span { color: var(--muted); font-size: 11px; }
+  .dash-stat.working { border-left-color: #e3b341; }
+  .dash-stat.working b { color: #e3b341; }
+  .dash-stat.waiting { border-left-color: var(--live); }
+  .dash-stat.waiting b { color: var(--live); }
+  .dash-stat.interrupted { border-left-color: #f85149; }
+  .dash-stat.interrupted b { color: #f85149; }
+  .dash-sec { margin: 18px 0; }
+  .dash-sec h3 { font-size: 11px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .dash-row {
+    display: flex; align-items: center; gap: 11px; padding: 9px 12px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 9px; margin-bottom: 6px; background: var(--panel);
+  }
+  .dash-row:hover { border-color: var(--accent); }
+  .dash-row .dr-main { flex: 1; min-width: 0; }
+  .dash-row .dr-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dash-row .dr-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dash-row .dr-meta { color: var(--muted); font-size: 11px; text-align: right; white-space: nowrap; flex: none; }
+  .dash-row .dr-meta .tok { font-family: ui-monospace, monospace; }
+  .dash-empty { color: var(--muted); font-size: 13px; padding: 6px 2px; }
+  .dash-gitline { color: var(--muted); font-size: 11px; font-family: ui-monospace, monospace; margin-top: 2px; }
+
   /* Repo history visualiser */
   .viz { width: min(900px, 95%); }
   .viz-section { margin: 18px 0; }
@@ -390,6 +420,7 @@
   <span id="usage" class="usage" hidden></span>
   <span id="lights" class="lights"></span>
   <button id="updateBtn" class="update-btn" hidden></button>
+  <button id="dashboard">📊 Dashboard</button>
   <button id="wrapup">🧹 Wrap-up</button>
   <button id="refresh">↻ Refresh</button>
   <span id="status" class="meta"></span>
@@ -442,6 +473,20 @@
       <button class="chat-close" id="vizClose" title="Close">×</button>
     </div>
     <div id="vizBody" class="hk-body"></div>
+  </div>
+</div>
+
+<div id="dashOverlay" class="overlay center">
+  <div class="hk dash">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">📊 Current work</div>
+        <div class="csub" id="dashSub">Summarising…</div>
+      </div>
+      <button class="ghost" id="dashRefresh" title="Re-scan">↻</button>
+      <button class="chat-close" id="dashClose" title="Close">×</button>
+    </div>
+    <div id="dashBody" class="hk-body"></div>
   </div>
 </div>
 
@@ -1441,7 +1486,7 @@ document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('overlay').addEventListener('click', e => {
   if (e.target.id === 'overlay') closeChat();
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); closeDashboard(); } });
 
 // ---- Repo history visualiser ----------------------------------------------
 function closeViz() { document.getElementById('vizOverlay').classList.remove('show'); document.body.classList.remove('overlay-open'); }
@@ -1544,12 +1589,139 @@ function renderViz(d) {
   return h;
 }
 
+// ---- Current-work dashboard ------------------------------------------------
+// An at-a-glance overlay aggregating live state across ALL projects: what needs
+// your attention, what's running, what's context-heavy, and what's uncommitted.
+// Sessions come straight from the cached /api/sessions poll (DATA); git state is
+// fetched from /api/housekeeping on open (heavier, so not on every 5s tick).
+let dashGit = null; // last housekeeping repos, or null while loading
+function dashOpen() { return document.getElementById('dashOverlay').classList.contains('show'); }
+
+function openDashboard() {
+  document.getElementById('dashOverlay').classList.add('show');
+  document.body.classList.add('overlay-open');
+  dashGit = null;
+  renderDashboard();
+  loadDashGit();
+}
+function closeDashboard() {
+  document.getElementById('dashOverlay').classList.remove('show');
+  document.body.classList.remove('overlay-open');
+}
+
+async function loadDashGit() {
+  try {
+    const r = await fetch('/api/housekeeping');
+    const d = await r.json();
+    dashGit = d.repos || [];
+  } catch { dashGit = []; }
+  if (dashOpen()) renderDashboard();
+}
+
+// One clickable session row (opens the in-app chat).
+function dashRow({ p, s }) {
+  const ctxTok = s.contextTokens || 0;
+  const win = s.contextWindow || ((ctxTok > 200000) ? 1000000 : CTX_WINDOW);
+  const pct = Math.min(100, Math.round(ctxTok / win * 100));
+  return `<div class="dash-row" data-dashsession="${esc(s.sessionId)}" title="Open this session">
+    <span class="light ${s.status}" title="${STATUS_LABEL[s.status] || s.status}"></span>
+    <span class="pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
+    <div class="dr-main">
+      <div class="dr-title">${esc(s.title)}</div>
+      <div class="dr-sub">${esc(p.name)}${s.gitBranch ? ' · ⎇ ' + esc(s.gitBranch) : ''} · ${esc(s.lastPrompt) || '<em>no prompt</em>'}</div>
+    </div>
+    <div class="dr-meta">${timeAgo(s.mtimeMs)}<br><span class="tok">${fmtTok(ctxTok)} ctx · ${pct}%</span></div>
+  </div>`;
+}
+
+// One repo row with uncommitted/unpushed work (opens Wrap-up to act on it).
+function dashRepoRow(r) {
+  const g = r.git || {};
+  const line = `⎇ ${esc(g.branch || '?')}${g.dirty ? ` · ${g.dirty} uncommitted` : ''}${g.ahead ? ` · ${g.ahead} unpushed` : ''}`;
+  return `<div class="dash-row" data-dashrepo="1" title="Open Wrap-up to commit / push">
+    <span class="vbadge ${r.verdict}">${VERDICT_LABEL[r.verdict]}</span>
+    <div class="dr-main">
+      <div class="dr-title">${esc(r.name)}</div>
+      <div class="dash-gitline">${line}</div>
+    </div>
+  </div>`;
+}
+
+function renderDashboard() {
+  // Flatten non-archived sessions; "current work" = recent (non-stale) ones.
+  const all = [];
+  for (const p of DATA.projects) for (const s of p.sessions)
+    if (!s.archived) all.push({ p, s });
+  const active = all.filter(x => !isStale(x.s));
+
+  const counts = { working: 0, waiting: 0, interrupted: 0 };
+  for (const { s } of active) if (counts[s.status] !== undefined) counts[s.status]++;
+  const liveTerminals = DATA.projects.reduce((n, p) => n + (p.liveTerminals || 0), 0);
+  const activeProjects = new Set(active.map(x => x.p.cwd)).size;
+
+  document.getElementById('dashSub').textContent =
+    `${counts.working} working · ${counts.waiting} your turn · ${counts.interrupted} interrupted · across ${activeProjects} project${activeProjects !== 1 ? 's' : ''}`;
+
+  let h = `<div class="dash-stats">
+    <div class="dash-stat waiting"><b>${counts.waiting}</b><span>your turn</span></div>
+    <div class="dash-stat working"><b>${counts.working}</b><span>working</span></div>
+    <div class="dash-stat interrupted"><b>${counts.interrupted}</b><span>interrupted</span></div>
+    <div class="dash-stat"><b>${activeProjects}</b><span>active project${activeProjects !== 1 ? 's' : ''}</span></div>
+    <div class="dash-stat"><b>${liveTerminals}</b><span>live terminal${liveTerminals !== 1 ? 's' : ''}</span></div>
+  </div>`;
+
+  // Needs your attention: a turn finished (waiting) or stalled (interrupted).
+  const attention = active.filter(x => x.s.status === 'waiting' || x.s.status === 'interrupted')
+    .sort((a, b) => b.s.mtimeMs - a.s.mtimeMs);
+  h += `<div class="dash-sec"><h3>Needs your attention</h3>${
+    attention.length ? attention.map(dashRow).join('') : '<div class="dash-empty">Nothing waiting — all caught up.</div>'}</div>`;
+
+  // In progress now.
+  const working = active.filter(x => x.s.status === 'working').sort((a, b) => b.s.mtimeMs - a.s.mtimeMs);
+  h += `<div class="dash-sec"><h3>In progress now</h3>${
+    working.length ? working.map(dashRow).join('') : '<div class="dash-empty">Nothing running.</div>'}</div>`;
+
+  // Context heavy: sessions past the warn threshold, fullest first.
+  const heavy = active.map(x => {
+    const ctxTok = x.s.contextTokens || 0;
+    const win = x.s.contextWindow || ((ctxTok > 200000) ? 1000000 : CTX_WINDOW);
+    return { x, pct: Math.min(100, Math.round(ctxTok / win * 100)) };
+  }).filter(o => o.pct >= CTX_WARN).sort((a, b) => b.pct - a.pct);
+  if (heavy.length) {
+    h += `<div class="dash-sec"><h3>Context heavy</h3>${heavy.map(o => dashRow(o.x)).join('')}</div>`;
+  }
+
+  // Uncommitted / unpushed work, from the housekeeping scan.
+  let gitSec;
+  if (dashGit === null) {
+    gitSec = '<div class="dash-empty">Checking repositories…</div>';
+  } else {
+    const dirty = dashGit.filter(r => r.verdict === 'dirty' || r.verdict === 'unpushed');
+    gitSec = dirty.length ? dirty.map(dashRepoRow).join('')
+      : '<div class="dash-empty">Everything committed and pushed.</div>';
+  }
+  h += `<div class="dash-sec"><h3>Uncommitted work</h3>${gitSec}</div>`;
+
+  document.getElementById('dashBody').innerHTML = h;
+}
+
+document.getElementById('dashBody').addEventListener('click', e => {
+  const sRow = e.target.closest('[data-dashsession]');
+  if (sRow) { const id = sRow.dataset.dashsession; closeDashboard(); openChat(id); return; }
+  if (e.target.closest('[data-dashrepo]')) { closeDashboard(); openHousekeeping(); }
+});
+document.getElementById('dashboard').addEventListener('click', openDashboard);
+document.getElementById('dashClose').addEventListener('click', closeDashboard);
+document.getElementById('dashRefresh').addEventListener('click', () => { renderDashboard(); loadDashGit(); });
+document.getElementById('dashOverlay').addEventListener('click', e => { if (e.target.id === 'dashOverlay') closeDashboard(); });
+
 async function load() {
   try {
     const r = await fetch('/api/sessions');
     DATA = await r.json();
     refreshKnownSessions();
     render();
+    if (dashOpen()) renderDashboard(); // keep the open dashboard live with the 5s poll
     handleVersion(DATA.version);
     handleUsage(DATA.usage);
     if (!hashJumped) { hashJumped = true; jumpToHashSession(); } // honor #session=… on first load
