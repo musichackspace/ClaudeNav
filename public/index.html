@@ -1367,9 +1367,19 @@ function renderStreaming(partial) {
   let el = body.querySelector('.msg.streaming');
   if (!el) {
     body.insertAdjacentHTML('beforeend', `<div class="msg assistant streaming">${inner}</div>`);
-  } else {
+    el = body.querySelector('.msg.streaming');
+  } else if (el.dataset.prev !== inner) {
+    // The poll re-renders this preview every ~2s. A naive innerHTML swap snaps
+    // every <details> shut, so a tool block you expanded to read closes under
+    // you mid-turn. Carry the open/closed state across the swap (by position —
+    // blocks only append as the turn streams), and skip the swap entirely when
+    // nothing changed.
+    const open = [...el.querySelectorAll('details')].map(d => d.open);
     el.innerHTML = inner;
+    const fresh = el.querySelectorAll('details');
+    open.forEach((o, i) => { if (o && fresh[i]) fresh[i].open = true; });
   }
+  el.dataset.prev = inner;
   if (nearBottom) pinToBottom(body);
 }
 function clearStreaming() {
