@@ -70,6 +70,17 @@ under launchd's minimal environment.
   `~/.claude/claudenav-archived.json` (a flat array of session IDs); each session
   in `/api/sessions` carries an `archived` boolean. The UI's "Show archived"
   toggle reveals them so you can unarchive.
+- `GET /api/browse?path=<dir>` — list a folder's immediate sub-directories
+  (dotfiles hidden) plus `{path, parent, home, isRepo}`. Bounded to `$HOME`
+  (escapes via `..`/symlink return 403). Powers the **+ New project** folder
+  picker; defaults to `$HOME` when `path` is empty.
+- `POST /api/mkdir {parent, name}` — create a folder under `parent` (single path
+  segment, `$HOME`-bounded). Used by the picker's "+ New folder".
+- `POST /api/git-init {cwd}` — `git init` a folder (idempotent; `$HOME`-bounded),
+  so a brand-new project gets commit/push/wrap-up from day one. New projects
+  start as a plain session in the chosen folder (no worktree — there's no HEAD
+  to branch from yet); the per-project "+ New session" worktree flow stays for
+  established repos.
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
 - `POST /api/assess {session}` — AI "is it safe to wrap?" (adds a turn).
 - `POST /api/handover {session}` — for a context-heavy session: have it write a

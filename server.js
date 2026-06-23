@@ -1239,6 +1239,86 @@ function gitWorktreeAdd(cwd, name, cb) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// New-project bootstrapping — browse the filesystem, make folders, git init.
+// All three are bounded to the user's home dir: the browser-driven picker has
+// no business reaching outside it, and the bound keeps the path guard simple
+// (the git write endpoints guard on knownCwds(); a fresh folder isn't known
+// yet, so these need their own boundary).
+// ---------------------------------------------------------------------------
+
+const HOME = os.homedir();
+
+// Resolve a candidate path and confirm it stays within HOME. Returns the
+// resolved absolute path, or null if it escapes (via .., symlink, etc.).
+function underHome(p) {
+  if (!p || typeof p !== 'string') return null;
+  let abs;
+  try { abs = fs.realpathSync(path.resolve(p)); }
+  catch { abs = path.resolve(p); } // may not exist yet (mkdir target) — resolve lexically
+  const root = fs.realpathSync(HOME);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  return abs;
+}
+
+// List immediate subdirectories of a path (dotfiles hidden by default), plus
+// whether the path itself is a git repo. Powers the new-project folder picker.
+function browseDir(p) {
+  const abs = underHome(p && p.trim() ? p : HOME);
+  if (!abs) { const e = new Error('path is outside your home directory'); e.status = 403; throw e; }
+  let entries = [];
+  try { entries = fs.readdirSync(abs, { withFileTypes: true }); }
+  catch { const e = new Error('cannot read that folder'); e.status = 400; throw e; }
+  const dirs = entries
+    .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+    .map(d => d.name)
+    .sort((a, b) => a.localeCompare(b))
+    .map(name => ({ name, path: path.join(abs, name) }));
+  let isRepo = false;
+  try { isRepo = git(abs, ['rev-parse', '--is-inside-work-tree']) === 'true'; } catch {}
+  const parent = path.dirname(abs);
+  return {
+    path: abs,
+    parent: (abs !== fs.realpathSync(HOME) && underHome(parent)) ? parent : null,
+    home: fs.realpathSync(HOME),
+    isRepo,
+    dirs,
+  };
+}
+
+function makeDir(parent, name) {
+  const base = underHome(parent);
+  if (!base) { const e = new Error('parent is outside your home directory'); e.status = 403; throw e; }
+  const clean = (name || '').trim();
+  if (!clean || /[/\\]/.test(clean) || clean === '.' || clean === '..') {
+    const e = new Error('invalid folder name'); e.status = 400; throw e;
+  }
+  const target = path.join(base, clean);
+  if (!underHome(path.dirname(target))) { const e = new Error('outside your home directory'); e.status = 403; throw e; }
+  try { fs.mkdirSync(target, { recursive: true }); }
+  catch (e2) { const e = new Error('could not create folder: ' + e2.message); e.status = 400; throw e; }
+  return { path: fs.realpathSync(target) };
+}
+
+// `git init` a folder (idempotent) so the wrap-up / commit / push machinery
+// has a repo to work with. New projects start as a plain session in the folder
+// (not a worktree — there's no HEAD to branch from yet); worktrees stay the
+// per-project "+ New session" affordance for established repos.
+function gitInit(cwd, cb) {
+  const abs = underHome(cwd);
+  if (!abs) return cb(new Error('outside your home directory'));
+  if (!fs.existsSync(abs)) return cb(new Error('folder does not exist'));
+  try {
+    if (git(abs, ['rev-parse', '--is-inside-work-tree']) === 'true') return cb(null, { path: abs, alreadyRepo: true });
+  } catch {}
+  try {
+    execFileSync('git', ['-C', abs, 'init'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    cb(null, { path: abs, initialized: true });
+  } catch (e) {
+    cb(new Error((e.stderr || e.message || 'git init failed').toString().trim().slice(0, 300)));
+  }
+}
+
 // Merge a session worktree's branch back into the repo's main checkout, then
 // remove the worktree. Refuses if the main checkout has uncommitted changes
 // (so we never clobber another session's in-flight work).
@@ -1542,6 +1622,29 @@ const server = http.createServer((req, res) => {
     return readBody(req, (err, body) => {
       if (err) return sendJSON(res, 400, { error: 'bad json' });
       gitWorktreeMerge(body.path, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/browse') {
+    try { return sendJSON(res, 200, browseDir(url.searchParams.get('path') || '')); }
+    catch (e) { return sendJSON(res, e.status || 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/mkdir' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      try { return sendJSON(res, 200, { ok: true, ...makeDir(body.parent, body.name) }); }
+      catch (e) { return sendJSON(res, e.status || 500, { error: e.message }); }
+    });
+  }
+
+  if (url.pathname === '/api/git-init' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      gitInit(body.cwd, (e, info) => {
         if (e) return sendJSON(res, 400, { error: e.message });
         sendJSON(res, 200, { ok: true, ...info });
       });

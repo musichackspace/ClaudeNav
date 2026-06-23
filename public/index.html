@@ -210,6 +210,26 @@
   .hkres.pending { background: var(--chip); color: var(--muted); }
   .hkres.safe { background: rgba(63,185,80,.14); color: var(--live); }
   .hkres.wip { background: rgba(248,81,73,.14); color: #f85149; }
+  /* New-project picker */
+  .np { width: min(620px, 94%); }
+  .np-crumb { display: flex; align-items: center; gap: 8px; margin: 8px 0 6px; }
+  .np-crumb button { padding: 4px 10px; }
+  .np-path { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .np-list { border: 1px solid var(--border); border-radius: 9px; max-height: 38vh; overflow-y: auto; }
+  .np-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .np-row:last-child { border-bottom: 0; }
+  .np-row:hover { background: var(--panel); }
+  .np-row .repo-tag { margin-left: auto; font-size: 10.5px; color: var(--live); background: rgba(63,185,80,.16); padding: 2px 7px; border-radius: 99px; }
+  .np-empty { padding: 14px; color: var(--muted); font-size: 12.5px; text-align: center; }
+  .np-newrow { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .np-newrow input { flex: 1; font-size: 13px; padding: 6px 9px; }
+  .np-foot { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .np-selected { font-size: 12.5px; margin-bottom: 6px; }
+  .np-git { font-size: 12.5px; color: var(--muted); margin-bottom: 12px; min-height: 18px; }
+  .np-git label { color: var(--text); cursor: pointer; }
+  .np-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .np-actions .primary { background: var(--accent); border-color: var(--accent); color: #1b1206; font-weight: 600; }
+  .np-actions .primary:disabled { opacity: .5; cursor: not-allowed; }
   .chat {
     width: min(560px, 100%); background: var(--bg); border-left: 1px solid var(--border);
     display: flex; flex-direction: column; height: 100%;
@@ -420,6 +440,7 @@
   <span id="usage" class="usage" hidden></span>
   <span id="lights" class="lights"></span>
   <button id="updateBtn" class="update-btn" hidden></button>
+  <button id="newProject" title="Start a brand-new Claude project in any folder — pick or create one, no terminal needed">+ New project</button>
   <button id="dashboard">📊 Dashboard</button>
   <button id="wrapup">🧹 Wrap-up</button>
   <button id="refresh">↻ Refresh</button>
@@ -487,6 +508,37 @@
       <button class="chat-close" id="dashClose" title="Close">×</button>
     </div>
     <div id="dashBody" class="hk-body"></div>
+  </div>
+</div>
+
+<div id="newProjOverlay" class="overlay center">
+  <div class="hk np">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">+ New project</div>
+        <div class="csub">Pick or create a folder, then start a session in it — no terminal needed.</div>
+      </div>
+      <button class="chat-close" id="npClose" title="Close">×</button>
+    </div>
+    <div class="hk-body">
+      <div class="np-crumb"><button id="npUp" title="Up one level">↑</button><span id="npPath" class="np-path"></span></div>
+      <div id="npList" class="np-list"></div>
+      <div id="npNewWrap" class="np-newrow">
+        <button id="npNewToggle" class="ghost">+ New folder…</button>
+        <span id="npNewForm" hidden>
+          <input id="npNewName" type="text" placeholder="folder-name" autocomplete="off" />
+          <button id="npNewCreate" class="primary">Create</button>
+        </span>
+      </div>
+      <div class="np-foot">
+        <div class="np-selected">Selected: <span id="npSelected" class="np-path">—</span></div>
+        <div id="npGitLine" class="np-git"></div>
+        <div class="np-actions">
+          <button id="npCancel" class="ghost">Cancel</button>
+          <button id="npStart" class="primary" disabled>Start session</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1486,7 +1538,7 @@ document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('overlay').addEventListener('click', e => {
   if (e.target.id === 'overlay') closeChat();
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); closeDashboard(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); closeDashboard(); closeNewProject(); } });
 
 // ---- Repo history visualiser ----------------------------------------------
 function closeViz() { document.getElementById('vizOverlay').classList.remove('show'); document.body.classList.remove('overlay-open'); }
@@ -2029,6 +2081,105 @@ async function wrapAll() {
   toast('Wrap-up complete');
   setTimeout(loadHousekeeping, 1000);
 }
+
+// ---- New project ----------------------------------------------------------
+// Browse the filesystem (server-driven, bounded to $HOME), optionally create a
+// folder, then start a plain headless session in it — offering `git init` first
+// for non-repos so the wrap-up/commit machinery works from day one. The folder
+// you're *viewing* is the one you start in; descend into it, then Start.
+let npState = { path: null, parent: null, isRepo: false };
+
+function openNewProject() {
+  document.getElementById('newProjOverlay').classList.add('show');
+  document.body.classList.add('overlay-open');
+  npNewFormReset();
+  npBrowse(''); // server defaults to $HOME
+}
+function closeNewProject() {
+  document.getElementById('newProjOverlay').classList.remove('show');
+  document.body.classList.remove('overlay-open');
+}
+function npOpen() { return document.getElementById('newProjOverlay').classList.contains('show'); }
+
+async function npBrowse(p) {
+  const list = document.getElementById('npList');
+  list.innerHTML = '<div class="np-empty">Loading…</div>';
+  let j;
+  try {
+    const r = await fetch('/api/browse?path=' + encodeURIComponent(p || ''));
+    j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+  } catch (e) { list.innerHTML = '<div class="np-empty">' + esc(e.message) + '</div>'; return; }
+
+  npState = { path: j.path, parent: j.parent, isRepo: j.isRepo };
+  document.getElementById('npPath').textContent = j.path;
+  document.getElementById('npPath').title = j.path;
+  document.getElementById('npUp').disabled = !j.parent;
+
+  list.innerHTML = j.dirs.length
+    ? j.dirs.map(d => `<div class="np-row" data-path="${esc(d.path)}">📁 ${esc(d.name)}</div>`).join('')
+    : '<div class="np-empty">No sub-folders here.</div>';
+
+  // Selected = the folder you're currently in. Reflect its git state.
+  document.getElementById('npSelected').textContent = j.path;
+  document.getElementById('npStart').disabled = false;
+  const gl = document.getElementById('npGitLine');
+  if (j.isRepo) {
+    gl.innerHTML = '✓ Git repo — commit &amp; wrap-up ready.';
+  } else {
+    gl.innerHTML = '<label><input type="checkbox" id="npGitInit" checked> <code>git init</code> first — enables commit, push &amp; wrap-up.</label>';
+  }
+  npNewFormReset();
+}
+
+function npNewFormReset() {
+  document.getElementById('npNewForm').hidden = true;
+  document.getElementById('npNewToggle').hidden = false;
+  document.getElementById('npNewName').value = '';
+}
+
+async function npCreateFolder() {
+  const name = document.getElementById('npNewName').value.trim();
+  if (!name) return;
+  try {
+    const j = await api('/api/mkdir', { parent: npState.path, name });
+    await npBrowse(j.path); // descend into the freshly-created folder
+    toast('Folder created');
+  } catch (e) { toast('Create failed: ' + e.message, true); }
+}
+
+async function npStart() {
+  const cwd = npState.path;
+  if (!cwd) return;
+  const name = cwd.split('/').filter(Boolean).slice(-1)[0] || cwd;
+  const initEl = document.getElementById('npGitInit');
+  try {
+    if (!npState.isRepo && initEl && initEl.checked) {
+      toast('Initialising git repo…');
+      await api('/api/git-init', { cwd });
+    }
+    closeNewProject();
+    openNewChat(cwd, name);
+    load(); // surface the new folder once the first turn lands
+  } catch (e) { toast('Could not start: ' + e.message, true); }
+}
+
+document.getElementById('newProject').addEventListener('click', openNewProject);
+document.getElementById('npClose').addEventListener('click', closeNewProject);
+document.getElementById('npCancel').addEventListener('click', closeNewProject);
+document.getElementById('npStart').addEventListener('click', npStart);
+document.getElementById('npUp').addEventListener('click', () => { if (npState.parent) npBrowse(npState.parent); });
+document.getElementById('npList').addEventListener('click', e => {
+  const row = e.target.closest('.np-row'); if (row) npBrowse(row.dataset.path);
+});
+document.getElementById('npNewToggle').addEventListener('click', () => {
+  document.getElementById('npNewForm').hidden = false;
+  document.getElementById('npNewToggle').hidden = true;
+  document.getElementById('npNewName').focus();
+});
+document.getElementById('npNewCreate').addEventListener('click', npCreateFolder);
+document.getElementById('npNewName').addEventListener('keydown', e => { if (e.key === 'Enter') npCreateFolder(); });
+document.getElementById('newProjOverlay').addEventListener('click', e => { if (e.target.id === 'newProjOverlay') closeNewProject(); });
 
 document.getElementById('wrapup').addEventListener('click', openHousekeeping);
 document.getElementById('hkClose').addEventListener('click', closeHousekeeping);
