@@ -267,6 +267,22 @@
   /* Expandable tool calls — collapsed shows name + one-line detail; click to
      reveal the full input and the tool's output. */
   .tools { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+  /* Collapsed wrapper for a long run of tool calls — one line by default. */
+  .toolgroup { margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel2); }
+  .toolgroup > summary {
+    list-style: none; cursor: pointer; padding: 5px 10px; font-size: 12px;
+    display: flex; align-items: baseline; gap: 7px; color: var(--muted);
+  }
+  .toolgroup > summary::-webkit-details-marker { display: none; }
+  .toolgroup > summary::before { content: '▸'; font-size: 10px; color: var(--muted); flex: none; }
+  .toolgroup[open] > summary::before { content: '▾'; }
+  .toolgroup .tgname { color: var(--text); font-weight: 600; flex: none; }
+  .toolgroup .tgdetail {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .toolgroup.err .tgname { color: #f85149; }
+  .toolgroup > .tools { margin: 0; padding: 0 8px 8px; }
   .tool { border: 1px solid var(--border); border-radius: 8px; background: var(--panel2); overflow: hidden; }
   .tool > summary {
     list-style: none; cursor: pointer; padding: 5px 10px; font-size: 12px;
@@ -1458,7 +1474,21 @@ function renderTools(list) {
     const output = t.output ? `<h6>Output</h6><pre>${esc(t.output)}</pre>` : '';
     return `<details class="tool${t.error ? ' err' : ''}">${head}<div class="tbody">${input}${output}</div></details>`;
   }).join('');
-  return `<div class="tools">${rows}</div>`;
+  // A long run of tool calls (Bash/Read/…) otherwise fills the whole chat
+  // panel. Collapse groups of more than COLLAPSE_AT into a single summary line
+  // (showing a count + a breakdown by tool name); the individual rows — each
+  // still independently expandable — live inside.
+  const COLLAPSE_AT = 4;
+  if (tools.length <= COLLAPSE_AT) return `<div class="tools">${rows}</div>`;
+  const counts = {};
+  for (const t of tools) counts[t.name] = (counts[t.name] || 0) + 1;
+  const breakdown = Object.entries(counts)
+    .map(([n, c]) => c > 1 ? `${esc(n)}×${c}` : esc(n)).join(', ');
+  const anyErr = tools.some(t => t.error);
+  return `<details class="toolgroup${anyErr ? ' err' : ''}">
+    <summary><span class="tgname">${tools.length} tool calls</span><span class="tgdetail">${breakdown}</span></summary>
+    <div class="tools">${rows}</div>
+  </details>`;
 }
 
 function renderMsg(m) {
