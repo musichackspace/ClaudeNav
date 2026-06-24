@@ -1818,9 +1818,19 @@ async function load() {
     handleUsage(DATA.usage);
     if (!hashJumped) { hashJumped = true; jumpToHashSession(); } // honor #session=… on first load
   } catch (e) {
-    document.getElementById('content').innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>';
+    // load() is both the initial fetch and the 5s poll. A transient poll
+    // failure (server briefly busy/restarting — Safari reports "Load failed")
+    // must NOT blank the last good render; only show the error if we've never
+    // loaded. Persistent outages still surface via a throttled toast.
+    if (!DATA.generatedAt) {
+      document.getElementById('content').innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>';
+    } else if (Date.now() - lastLoadErrorToast > 30000) {
+      lastLoadErrorToast = Date.now();
+      toast('Refresh failed (' + esc(e.message) + ') — showing last known state', true);
+    }
   }
 }
+let lastLoadErrorToast = 0;
 
 // --- Usage limits ------------------------------------------------------------
 // Mirrors Claude Code's /usage menu: a compact row of bars for the current
