@@ -821,7 +821,10 @@ function drainQueue(sessionId) {
     args.push('--permission-mode', mode);
   }
 
-  const child = spawn(CLAUDE_BIN, args, { cwd });
+  // stdin='ignore' (= `< /dev/null`): a headless `-p` turn reads no input, and
+  // leaving stdin an open pipe makes the CLI warn ("no stdin data received in
+  // 3s") and stall waiting on it.
+  const child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   livePartial.set(sessionId, { text: '', tools: [], ask: null, updatedAt: Date.now() });
 
   let buf = '';
