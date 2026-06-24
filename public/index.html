@@ -1899,7 +1899,13 @@ function handleVersion(v) {
     title = `Disk is at ${v.head} but the server is still running ${v.bootHead}. Relaunch to apply.`;
   } else if (v.hasRemote && v.behind > 0) {
     state = 'update';
-    if (v.dirty > 0) {
+    if (v.ahead > 0) {
+      // Diverged: a --ff-only pull will refuse. Don't offer a doomed button —
+      // show a non-actionable warning; the fix is manual (reset to origin).
+      state = 'blocked';
+      label = `⚠ ${v.behind} behind — can't auto-update`; stale = true;
+      title = `origin is ${v.behind} commit(s) ahead but this checkout has ${v.ahead} local commit(s), so a fast-forward update isn't possible. Reset the ClaudeNav repo to origin/main, then relaunch.`;
+    } else if (v.dirty > 0) {
       label = `⬆ ${v.behind} update${v.behind > 1 ? 's' : ''} available`; stale = true;
       title = `origin is ${v.behind} commit(s) ahead, but the working tree has ${v.dirty} uncommitted change(s) — a fast-forward update may fail.`;
     } else {
@@ -1919,7 +1925,8 @@ function handleVersion(v) {
     btn.textContent = '✓ Up to date';
     btn.title = `ClaudeNav is running the latest code (${v.head || v.bootHead || '—'}).`;
   } else {
-    btn.disabled = false;
+    // 'blocked' = behind but can't fast-forward (diverged): warn, don't offer a click.
+    btn.disabled = state === 'blocked';
     btn.classList.remove('idle');
     btn.classList.toggle('stale', stale);
     btn.textContent = label;
@@ -1930,6 +1937,7 @@ function handleVersion(v) {
 async function doUpdate() {
   const btn = document.getElementById('updateBtn');
   if (updateState === 'reload') { location.reload(); return; }
+  if (updateState !== 'update' && updateState !== 'relaunch') return; // 'blocked'/none: nothing to do
   const pull = updateState === 'update';
   btn.dataset.busy = '1';
   btn.disabled = true;

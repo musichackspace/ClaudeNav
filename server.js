@@ -935,6 +935,10 @@ function versionInfo() {
   const branch = gitRepo(['rev-parse', '--abbrev-ref', 'HEAD']);
   const dirty = gitRepo(['status', '--porcelain']).split('\n').filter(Boolean).length;
   const hasRemote = !!gitRepo(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  // Local commits not on the upstream. A `--ff-only` pull refuses to run when
+  // ahead > 0 ("Not possible to fast-forward"), so this must gate canUpdate too
+  // — a clean-but-diverged checkout would otherwise show a button doomed to fail.
+  const ahead = hasRemote ? (Number(gitRepo(['rev-list', '--count', '@{u}..HEAD'])) || 0) : 0;
   return {
     bootId: BOOT_ID,        // changes when the server restarts
     bootHead: BOOT_HEAD,    // commit the process is running
@@ -942,9 +946,10 @@ function versionInfo() {
     branch,
     dirty,
     behind: fetchState.behind,
+    ahead,
     hasRemote,
-    // Safe to fast-forward only when clean and actually behind.
-    canUpdate: hasRemote && fetchState.behind > 0 && dirty === 0,
+    // Safe to fast-forward only when clean, actually behind, and NOT diverged.
+    canUpdate: hasRemote && fetchState.behind > 0 && dirty === 0 && ahead === 0,
   };
 }
 
