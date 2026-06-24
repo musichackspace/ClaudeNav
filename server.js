@@ -1729,9 +1729,25 @@ const server = http.createServer((req, res) => {
   serveStatic(res, url.pathname);
 });
 
+// A port clash is often transient — another local node server (or our own
+// previous process mid-restart) briefly holds 4317. Retrying beats exiting:
+// exit(1) counts against run-server.sh's 3-crashes-in-60s cap, so a brief
+// overlap could otherwise knock ClaudeNav out *permanently*. Retry with backoff
+// for ~30s; only give up if the port stays occupied (a real second instance).
+const BIND_RETRIES = 10;
+const BIND_RETRY_MS = 3000;
+let bindAttempts = 0;
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use — ClaudeNav may already be running.`);
+    bindAttempts++;
+    if (bindAttempts <= BIND_RETRIES) {
+      console.error(`Port ${PORT} is busy (attempt ${bindAttempts}/${BIND_RETRIES}) — `
+        + `another local server may be using it; retrying in ${BIND_RETRY_MS / 1000}s…`);
+      setTimeout(() => server.listen(PORT, HOST), BIND_RETRY_MS);
+      return;
+    }
+    console.error(`Port ${PORT} is still in use after ${BIND_RETRIES} retries — `
+      + `ClaudeNav may already be running.`);
     console.error(`Open http://${HOST}:${PORT} or set PORT=<other> to run a second instance.`);
     process.exit(1);
   }
@@ -1739,6 +1755,7 @@ server.on('error', (e) => {
 });
 
 server.listen(PORT, HOST, () => {
+  if (bindAttempts) console.log(`Port ${PORT} freed up after ${bindAttempts} retr${bindAttempts > 1 ? 'ies' : 'y'}.`);
   console.log(`ClaudeNav running at http://${HOST}:${PORT}`);
   console.log(`Reading sessions from ${PROJECTS_DIR}`);
 });
