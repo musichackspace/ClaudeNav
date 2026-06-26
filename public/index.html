@@ -246,6 +246,7 @@
   .mode-pick select.plan { border-color: #58a6ff; color: #58a6ff; }
   .mode-badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
   .mode-badge.plan { border-color: #58a6ff; color: #58a6ff; }
+  .mode-badge.model { margin-left: 4px; border-color: #d2a8ff; color: #d2a8ff; }
   .chat-close { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; padding: 0 4px; }
   .chat-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px; }
   .msg { margin-bottom: 14px; }
@@ -475,6 +476,10 @@
         <div id="chatTitle" class="ctitle"></div>
         <div id="chatSub" class="csub"></div>
       </div>
+      <label class="mode-pick" title="Model for the next message sent from ClaudeNav. Default = inherit your account/CLI default.">
+        model
+        <select id="chatModel"></select>
+      </label>
       <label class="mode-pick" title="Permission mode for the next message sent from ClaudeNav. Plan = read-only, Claude proposes a plan without making changes.">
         mode
         <select id="chatMode"></select>
@@ -600,6 +605,32 @@ const STATUS_LABEL = { working: 'Working', waiting: 'Your turn', interrupted: 'I
 const MODE_LABEL = { default: 'Default', plan: 'Plan', acceptEdits: 'Accept edits', auto: 'Auto', bypassPermissions: 'Bypass', dontAsk: "Don't ask" };
 const MODE_CHOICES = ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'];
 function modeOf(s) { return (s && s.mode) || 'bypassPermissions'; }
+// Model per session — exact model ids passed to the CLI as --model. 'default' =
+// inherit the account/CLI default (no override). The list is fetched from the
+// Anthropic Models API once a day (server side) and delivered with each poll, so
+// it tracks new releases without a code change. We keep a fallback so the picker
+// still works before the first poll lands.
+let MODEL_CATALOG = [
+  { id: 'default', label: 'Default' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+];
+function modelLabel(id) {
+  const m = MODEL_CATALOG.find(x => x.id === id);
+  return m ? m.label : (id || 'Default');
+}
+// Adopt the server's daily-refreshed list (arrives on each /api/sessions poll).
+function handleModels(info) {
+  if (info && Array.isArray(info.models) && info.models.length) MODEL_CATALOG = info.models;
+  // Refresh the open picker so a newly-arrived model appears without reopening.
+  const sel = document.getElementById('chatModel');
+  if (sel && document.getElementById('overlay').classList.contains('show')) {
+    setupModelSelect(sel.value);
+  }
+}
+function modelOf(s) { return (s && s.model) || 'default'; }
 // Recency-first view: by default show sessions touched in the last 3 days
 // (ANY status) and collapse everything older — what's recent matters more than
 // what state it's in. "Show older" reveals the rest; they stay searchable
@@ -815,7 +846,7 @@ function render() {
         <span class="pill ${s.status}">${STATUS_LABEL[s.status] || s.status}</span>
         ${s.archived ? '<span class="pill archived-tag">Archived</span>' : ''}
         <div class="s-main">
-          <div class="s-title">${esc(s.title)} <span class="mode-badge ${modeOf(s) === 'plan' ? 'plan' : ''}" title="Permission mode for the next ClaudeNav turn${s.modeOverride ? ' (pinned)' : ''}">${esc(MODE_LABEL[modeOf(s)] || modeOf(s))}</span></div>
+          <div class="s-title">${esc(s.title)} <span class="mode-badge ${modeOf(s) === 'plan' ? 'plan' : ''}" title="Permission mode for the next ClaudeNav turn${s.modeOverride ? ' (pinned)' : ''}">${esc(MODE_LABEL[modeOf(s)] || modeOf(s))}</span>${s.modelOverride ? `<span class="mode-badge model" title="Model pinned for the next ClaudeNav turn">${esc(modelLabel(s.modelOverride))}</span>` : ''}</div>
           <div class="s-sub">${s.gitBranch ? '⎇ ' + esc(s.gitBranch) + ' · ' : ''}${esc(s.lastPrompt) || '<em>no prompt</em>'}</div>
           ${hint}
         </div>
@@ -992,6 +1023,39 @@ async function changeSessionMode(mode) {
   } catch (e) { toast('Could not set mode: ' + e.message, true); }
 }
 
+// Populate the chat-head model selector for the open session and wire its
+// change handler. `current` is the effective model to preselect.
+function setupModelSelect(current) {
+  const sel = document.getElementById('chatModel');
+  if (!sel) return;
+  const ids = MODEL_CATALOG.map(m => m.id);
+  // The session's effective model may not be in the catalog (e.g. a pinned id
+  // the daily list hasn't caught up to, or an older model) — show it anyway.
+  const opts = ids.includes(current)
+    ? MODEL_CATALOG.slice()
+    : [...MODEL_CATALOG, { id: current, label: modelLabel(current) }];
+  sel.innerHTML = opts.map(m =>
+    `<option value="${esc(m.id)}"${m.id === current ? ' selected' : ''}>${esc(m.label)}</option>`).join('');
+  sel.onchange = () => changeSessionModel(sel.value);
+}
+
+async function changeSessionModel(model) {
+  const id = chat.sessionId;
+  if (!id) return;
+  try {
+    const r = await fetch('/api/session-model', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: id, model }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    // Reflect immediately in the cached session so the row badge updates.
+    const found = findSession(id);
+    if (found) { found.s.model = model; found.s.modelOverride = model === 'default' ? null : model; }
+    toast('Model → ' + modelLabel(model));
+  } catch (e) { toast('Could not set model: ' + e.message, true); }
+}
+
 function openChat(id) {
   const found = findSession(id);
   if (!found) return;
@@ -1010,6 +1074,7 @@ function openChat(id) {
     `${p.name} · ${STATUS_LABEL[s.status] || s.status}` + (s.gitBranch ? ` · ⎇ ${s.gitBranch}` : '');
   document.getElementById('chatBody').innerHTML = '<div class="empty">Loading conversation…</div>';
   setupModeSelect(modeOf(s));
+  setupModelSelect(modelOf(s));
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
   renderCompose(p, s); // after .show so box.focus() lands on a visible element
@@ -1039,6 +1104,7 @@ function openNewChat(cwd, name) {
   document.getElementById('chatBody').innerHTML =
     '<div class="empty">New headless session in this folder.<br>Send a message to begin — no terminal needed.</div>';
   setupModeSelect('bypassPermissions');
+  setupModelSelect('default');
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
   renderCompose({ liveTerminals: 0 }, null); // after .show so box.focus() lands on a visible element
@@ -1816,6 +1882,7 @@ async function load() {
     if (dashOpen()) renderDashboard(); // keep the open dashboard live with the 5s poll
     handleVersion(DATA.version);
     handleUsage(DATA.usage);
+    handleModels(DATA.models);
     if (!hashJumped) { hashJumped = true; jumpToHashSession(); } // honor #session=… on first load
   } catch (e) {
     // load() is both the initial fetch and the 5s poll. A transient poll

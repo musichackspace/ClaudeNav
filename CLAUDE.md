@@ -70,6 +70,24 @@ to `/tmp/claudenav.log`. `uninstall` removes both agents.
   Each session in `/api/sessions` carries `permissionMode` (the mode of its last
   recorded turn), `modeOverride` (the pinned value, or null), and `mode` (the
   effective mode = override ?? last transcript mode ?? `bypassPermissions`).
+- `POST /api/session-model {session, model}` — pin the model the next headless
+  turn runs under. The value is an exact model id — `default` (clears the
+  override → inherit the CLI/account default) or any id from `/api/models`
+  (e.g. `claude-opus-4-8`) — passed to the CLI as `--model <id>`. Validated by
+  format only (the live list is authoritative; the CLI rejects a bogus id).
+  Persisted to `~/.claude/claudenav-models.json`. Each session in
+  `/api/sessions` carries `modelOverride` (the pinned id, or null) and `model`
+  (the effective choice = override ?? canonical id of the last-used transcript
+  model ?? `default`).
+- `GET /api/models` — the pickable model list (`{models:[{id,label},…], source,
+  error, at}`, `models[0]` is always `{id:'default'}`). Fetched from the
+  Anthropic Models API (`GET /v1/models`) using the stored OAuth token — same
+  source as `/api/usage` — and **background-refreshed once a day** (retries
+  ≤ every 30 min after a failure), so new releases appear and retired models
+  drop without a code change. Keeps the last good list (seeded from a built-in
+  fallback) when the API is unreachable; `source` is `api` or `default`. Also
+  attached to `/api/sessions` as `models`, so the 5s poll keeps the picker
+  current.
 - `POST /api/commit {cwd, message}` / `POST /api/push {cwd}` — git, restricted
   to known-session directories.
 - `POST /api/archive {session, archived}` — tuck a session away (or restore it

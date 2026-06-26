@@ -108,6 +108,7 @@ function parseSessionFile(filePath, stat) {
   let lastEventType = null; // 'user' | 'assistant' — last conversational record
   let lastStopReason = null; // stop_reason of the most recent assistant turn
   let permissionMode = null; // permission mode the most recent turn ran under
+  let lastModel = null; // model id the most recent assistant turn ran under
   let lastUserText = null; // text of the most recent user message (for ack detection)
   let lastAssistantText = null; // text of the most recent assistant message (for "awaiting you?" detection)
 
@@ -160,7 +161,7 @@ function parseSessionFile(filePath, stat) {
       case 'assistant': {
         lastEventType = 'assistant';
         const m = o.message || {};
-        if (m.model && m.model !== '<synthetic>') models.add(m.model);
+        if (m.model && m.model !== '<synthetic>') { models.add(m.model); lastModel = m.model; }
         if (m.stop_reason !== undefined) lastStopReason = m.stop_reason;
         // Keep the text of the latest assistant message that actually said
         // something (tool-only turns carry no text) — used to tell "I'm asking
@@ -198,6 +199,8 @@ function parseSessionFile(filePath, stat) {
     userMsgCount,
     assistantTurns,
     models: [...models],
+    lastModel,
+    lastModelChoice: modelChoice(lastModel),
     tokens,
     contextTokens,
     peakContextTokens,
@@ -415,6 +418,11 @@ function buildData() {
       // whether the user pinned it (vs. inherited from the transcript).
       s.modeOverride = sessionModes.get(s.sessionId) || null;
       s.mode = s.modeOverride || s.permissionMode || 'bypassPermissions';
+      // Model: what the next ClaudeNav turn will run under. modelOverride is the
+      // pinned model id (null = inherit); model is the effective choice for the
+      // picker (override, else the last-used model, else 'default').
+      s.modelOverride = sessionModels.get(s.sessionId) || null;
+      s.model = s.modelOverride || s.lastModelChoice || 'default';
       s.archived = archivedSessions.has(s.sessionId);
       // Confident tab mapping only when the folder has a single live terminal.
       s.inputTty = (p.liveTerminals === 1 && i === 0) ? p.liveTtys[0] : null;
@@ -694,6 +702,57 @@ function setSessionMode(sessionId, mode) {
   sessionModes.set(sessionId, mode);
   persistModes();
 }
+
+// Model the next headless turn runs under. ClaudeNav lets you pick one per
+// session; the exact model id is passed through to the CLI as --model <id>.
+// 'default' means "no override" — inherit whatever the CLI/account default is.
+// The pickable list is fetched from the Anthropic Models API once a day (see
+// maybeFetchModels) so it tracks new releases without a code change; this
+// built-in list is the fallback when the API is unreachable. Order = newest
+// first (matches the API's ordering); the picker prepends 'default'.
+const DEFAULT_MODELS = [
+  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+];
+// A model id is anything in the safe id charset; 'default' clears the override.
+// We don't gate on the fetched list — a saved/picked id may name a model the
+// list hasn't caught up to, and the CLI itself rejects a truly bogus id.
+function isValidModel(model) {
+  return model === 'default' || /^[a-zA-Z0-9._-]+$/.test(model || '');
+}
+// Map a full model id from a transcript to a known model id. Transcript ids may
+// carry a date suffix (e.g. claude-haiku-4-5-20251001), so match by prefix
+// against the current list. Returns the canonical id, or null if unknown.
+function modelChoice(id) {
+  if (!id) return null;
+  for (const m of modelsState.list) if (id.startsWith(m.id)) return m.id;
+  return null;
+}
+
+// User-chosen model overrides, sessionId -> model id. Persisted so a chosen
+// model survives a restart. When unset, a turn inherits the CLI default.
+const MODELS_FILE = path.join(os.homedir(), '.claude', 'claudenav-models.json');
+const sessionModels = new Map();
+try {
+  const raw = JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8'));
+  for (const [k, v] of Object.entries(raw)) if (typeof v === 'string' && v !== 'default' && isValidModel(v)) sessionModels.set(k, v);
+} catch { /* no file yet */ }
+function persistModels() {
+  try { fs.writeFileSync(MODELS_FILE, JSON.stringify(Object.fromEntries(sessionModels))); } catch {}
+}
+function setSessionModel(sessionId, model) {
+  if (!/^[\w-]+$/.test(sessionId || '')) throw new Error('bad session id');
+  if (!isValidModel(model)) throw new Error('unknown model');
+  if (model === 'default') sessionModels.delete(sessionId); // clear the override
+  else sessionModels.set(sessionId, model);
+  persistModels();
+}
+// The model id a turn for this session will pass to the CLI, or null to inherit.
+function effectiveModel(sessionId) {
+  return sessionModels.get(sessionId) || null;
+}
 // The mode a turn for this session will actually run under.
 function effectiveMode(sessionId) {
   if (sessionModes.has(sessionId)) return sessionModes.get(sessionId);
@@ -820,6 +879,10 @@ function drainQueue(sessionId) {
   } else {
     args.push('--permission-mode', mode);
   }
+  // Model override: pass the chosen model id through to the CLI. Unset = inherit
+  // whatever the CLI/account default is.
+  const model = effectiveModel(sessionId);
+  if (model) args.push('--model', model);
 
   // stdin='ignore' (= `< /dev/null`): a headless `-p` turn reads no input, and
   // leaving stdin an open pipe makes the CLI warn ("no stdin data received in
@@ -1057,6 +1120,75 @@ function summarizeUsage(raw) {
 function usageInfo() {
   maybeFetchUsage();
   return { ...usageState.data ? usageState.data : {}, error: usageState.error, at: usageState.at };
+}
+
+// ---------------------------------------------------------------------------
+// Available models — fetched from the Anthropic Models API once a day so the
+// per-session picker tracks new releases (and drops retired ones) without a
+// code change. Uses the same stored OAuth token as the usage fetch. Keeps the
+// last good list (seeded from DEFAULT_MODELS) on failure and retries sooner.
+// ---------------------------------------------------------------------------
+let modelsState = { at: 0, running: false, list: DEFAULT_MODELS, source: 'default', error: null };
+const MODELS_TTL = 24 * 60 * 60 * 1000;     // refresh once a day on success
+const MODELS_RETRY = 30 * 60 * 1000;        // but retry sooner after a failure
+// "Claude Opus 4.8" -> "Opus 4.8"; fall back to the bare id.
+function shortModelLabel(displayName, id) {
+  return displayName ? displayName.replace(/^Claude\s+/i, '') : id;
+}
+function parseModelsList(raw) {
+  const data = Array.isArray(raw?.data) ? raw.data : [];
+  return data
+    .filter((m) => typeof m?.id === 'string' && m.id.startsWith('claude-'))
+    .map((m) => ({ id: m.id, label: shortModelLabel(m.display_name, m.id) }));
+}
+function maybeFetchModels() {
+  const now = Date.now();
+  const ttl = modelsState.error ? MODELS_RETRY : MODELS_TTL;
+  if (modelsState.running || (modelsState.at && now - modelsState.at < ttl)) return;
+  const token = readOAuthToken();
+  if (!token) { modelsState = { ...modelsState, at: now, error: 'no-token' }; return; }
+  modelsState.running = true;
+  const req = https.request('https://api.anthropic.com/v1/models?limit=100', {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'oauth-2025-04-20',
+    },
+    timeout: 15000,
+  }, (resp) => {
+    let body = '';
+    resp.on('data', (c) => { body += c; });
+    resp.on('end', () => {
+      modelsState.running = false;
+      modelsState.at = Date.now();
+      if (resp.statusCode === 200) {
+        try {
+          const list = parseModelsList(JSON.parse(body));
+          // Only adopt a non-empty list; otherwise keep the last good one.
+          if (list.length) { modelsState.list = list; modelsState.source = 'api'; modelsState.error = null; }
+          else modelsState.error = 'empty';
+        } catch { modelsState.error = 'parse'; }
+      } else {
+        modelsState.error = `http-${resp.statusCode}`;
+      }
+    });
+  });
+  req.on('error', () => { modelsState.running = false; modelsState.at = Date.now(); modelsState.error = 'network'; });
+  req.on('timeout', () => { req.destroy(); });
+  req.end();
+}
+
+// The picker payload: 'default' first, then the current model list. Carries
+// source/error/at so the UI can tell live-from-API apart from the fallback.
+function modelsInfo() {
+  maybeFetchModels();
+  return {
+    models: [{ id: 'default', label: 'Default' }, ...modelsState.list],
+    source: modelsState.source,
+    error: modelsState.error,
+    at: modelsState.at,
+  };
 }
 
 function gitInfo(cwd) {
@@ -1505,6 +1637,7 @@ const server = http.createServer((req, res) => {
       const data = buildData();
       try { data.version = versionInfo(); } catch {}
       try { data.usage = usageInfo(); } catch {}
+      try { data.models = modelsInfo(); } catch {}
       return sendJSON(res, 200, data);
     }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
@@ -1517,6 +1650,11 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/api/usage') {
     try { return sendJSON(res, 200, usageInfo()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/models') {
+    try { return sendJSON(res, 200, modelsInfo()); }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
   }
 
@@ -1557,6 +1695,16 @@ const server = http.createServer((req, res) => {
       try {
         setSessionMode(body.session, body.mode);
         return sendJSON(res, 200, { ok: true, session: body.session, mode: body.mode });
+      } catch (e) { return sendJSON(res, 400, { error: e.message }); }
+    });
+  }
+
+  if (url.pathname === '/api/session-model' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      try {
+        setSessionModel(body.session, body.model);
+        return sendJSON(res, 200, { ok: true, session: body.session, model: body.model });
       } catch (e) { return sendJSON(res, 400, { error: e.message }); }
     });
   }
