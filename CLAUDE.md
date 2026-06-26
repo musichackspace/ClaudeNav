@@ -37,6 +37,14 @@ with a 3-crashes-in-60s cap; appends timestamped start/exit lines to
 `/tmp/claudenav.log`) and pins `PATH` + `CLAUDE_BIN` so headless turns work
 under launchd's minimal environment.
 
+The installer also loads a second LaunchAgent (`com.claudenav.watchdog`) that
+runs `watchdog.sh` every 60s (`CLAUDENAV_WATCHDOG_INTERVAL` to change). It pings
+`/api/version`; if the server is unreachable it `launchctl kickstart -k`s the
+main agent. This covers the two cases `KeepAlive` can't: a **hung** server
+(process alive, not serving) and a **crash-cap give-up** (`run-server.sh` exits
+0, so launchd won't relaunch). A healthy check is a silent no-op; a restart logs
+to `/tmp/claudenav.log`. `uninstall` removes both agents.
+
 > **Do NOT rely on `nohup … & disown` when launched from inside a tool wrapper.**
 > Processes spawned by a tool call (incl. via `nohup`/`disown`/`setsid`) get
 > SIGTERM'd after ~90s — the server's shutdown handler then exits 0, so it looks
