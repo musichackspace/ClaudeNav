@@ -96,6 +96,7 @@ function parseSessionFile(filePath, stat) {
   let firstTs = null;
   let lastTs = null;
   let cwd = null;
+  let firstCwd = null; // launch dir — the folder the CLI filed this transcript under (resume must run here)
   let gitBranch = null;
   let version = null;
   let sessionId = null;
@@ -120,7 +121,7 @@ function parseSessionFile(filePath, stat) {
 
     if (o.sessionId && !sessionId) sessionId = o.sessionId;
     if (o.permissionMode) permissionMode = o.permissionMode;
-    if (o.cwd) cwd = o.cwd;
+    if (o.cwd) { cwd = o.cwd; if (!firstCwd) firstCwd = o.cwd; }
     if (o.gitBranch) gitBranch = o.gitBranch;
     if (o.version) version = o.version;
     if (o.timestamp) {
@@ -194,6 +195,7 @@ function parseSessionFile(filePath, stat) {
     lastPrompt: lastPrompt || firstUserPrompt || '',
     firstUserPrompt: firstUserPrompt || '',
     cwd: cwd || '',
+    firstCwd: firstCwd || cwd || '',
     gitBranch: gitBranch || '',
     version: version || '',
     userMsgCount,
@@ -794,11 +796,22 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
   const imgPaths = (Array.isArray(images) ? images : []).map(saveImage).filter(Boolean);
   if ((!text || !text.trim()) && !imgPaths.length) return cb(new Error('empty message'));
 
-  // Existing session: use its recorded cwd. New session (no file yet): use the
-  // cwd the caller passed — drainQueue will create it with --session-id.
+  // Existing session: resume from its *launch* dir (firstCwd), not the last cwd
+  // recorded in the transcript. `claude --resume` scopes its session lookup to
+  // the project slug of the cwd it runs in, and the CLI filed this transcript
+  // under the dir the session started in. If the conversation later cd'd into a
+  // subfolder, the last-seen cwd points at a different (empty) project slug and
+  // resume fails with "No conversation found with session ID". New session (no
+  // file yet): use the cwd the caller passed — drainQueue creates it via
+  // --session-id.
   const fp = findSessionFile(sessionId);
   let cwd = '';
-  if (fp) { try { cwd = parseSessionFile(fp, fs.statSync(fp)).cwd; } catch {} }
+  if (fp) {
+    try {
+      const d = parseSessionFile(fp, fs.statSync(fp));
+      cwd = d.firstCwd || d.cwd;
+    } catch {}
+  }
   else { cwd = newCwd || ''; }
   if (!cwd || !fs.existsSync(cwd)) return cb(new Error('working directory is missing'));
 
