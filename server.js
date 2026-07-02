@@ -455,6 +455,14 @@ function buildShellCommand({ cwd, sessionId }) {
   return cmd;
 }
 
+// Re-login can't be headless (the OAuth flow is interactive-only), but we can
+// open a terminal with `claude /login` already running — the CLI executes a
+// slash command passed as the initial prompt. The echo is a fallback hint in
+// case a CLI version treats it as plain text instead.
+function buildLoginCommand() {
+  return `cd ${shQuote(os.homedir())} && echo 'Re-authenticating Claude — if login does not start automatically, type /login' && claude /login`;
+}
+
 function appleScriptFor(appName, shellCmd) {
   const q = osaQuote(shellCmd);
   if (appName === 'iTerm') {
@@ -489,9 +497,9 @@ function openUrl(rawUrl, cb) {
   execFile(cmd, args, (err) => err ? cb(new Error(err.message)) : cb(null, { opened: u.href }));
 }
 
-function openTerminal({ cwd, sessionId, app }, cb) {
-  if (!cwd) return cb(new Error('missing cwd'));
-  const shellCmd = buildShellCommand({ cwd, sessionId });
+function openTerminal({ cwd, sessionId, app, login }, cb) {
+  if (!login && !cwd) return cb(new Error('missing cwd'));
+  const shellCmd = login ? buildLoginCommand() : buildShellCommand({ cwd, sessionId });
   const script = appleScriptFor(app === 'iTerm' ? 'iTerm' : 'Terminal', shellCmd);
   execFile('osascript', ['-e', script], (err, stdout, stderr) => {
     if (err) return cb(new Error(stderr || err.message));
@@ -1875,6 +1883,9 @@ const server = http.createServer((req, res) => {
       running: runningChats.has(id) || queued > 0,
       queued,
       error: lastChatError.get(id) || null,
+      // Structured flag so the UI can offer a "Re-login" action without
+      // pattern-matching the human-readable error text.
+      needsLogin: lastChatError.get(id) === AUTH_ERR_MSG,
       partial: lp ? { text: lp.text, tools: lp.tools, ask: lp.ask || null } : null,
     });
   }

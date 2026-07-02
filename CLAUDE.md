@@ -63,9 +63,11 @@ removes both agents.
   (`--resume`, or `--session-id` to create a new one), via
   `--output-format stream-json --verbose` so blocks can be previewed live.
   Queued one-at-a-time per session; `cwd` is only used when creating.
-- `GET /api/chat-status?session=<id>` — `{running, queued, error, partial}`.
-  `partial` is the in-flight assistant output (`{text, tools}`, block-level —
-  the CLI doesn't stream tokens) or `null`.
+- `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
+  partial}`. `partial` is the in-flight assistant output (`{text, tools}`,
+  block-level — the CLI doesn't stream tokens) or `null`. `needsLogin` is true
+  when `error` is the auth-failure message; the UI then adds a "Re-login"
+  button to the error toast (opens a terminal via `/api/open {login:true}`).
 - `POST /api/chat-cancel {session}` — SIGTERM the running turn (marked so it
   isn't logged as an error) and drop anything queued behind it.
 - `POST /api/session-mode {session, mode}` — pin the permission mode the next
@@ -119,8 +121,11 @@ removes both agents.
   blank "+ New session"). Compaction in place is just `/compact` sent via `/api/chat`.
 - `POST /api/close {session}` — SIGTERM the live `claude` process(es) in the
   session's cwd (graceful; transcript persists, resumable).
-- `POST /api/open` — open Terminal/iTerm (resume or new). `/uploads/<name>` —
-  serves pasted images.
+- `POST /api/open` — open Terminal/iTerm (resume or new). With `{login:true}`
+  it instead opens the terminal running `claude /login` (from `$HOME`, no cwd
+  needed) — the re-auth path for expired OAuth credentials, which is
+  interactive-only and can't be run headlessly. `/uploads/<name>` — serves
+  pasted images.
 - `GET /api/version` — `{bootId, bootHead, head, branch, dirty, behind, hasRemote,
   canUpdate}`. `bootId`/`bootHead` describe the running process; `head`/`behind`
   reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
