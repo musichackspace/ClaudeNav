@@ -147,6 +147,12 @@ to `/tmp/claudenav.log`. `uninstall` removes both agents.
   PATH. If none resolve, it logs a WARNING at startup and turns fail with
   `spawn claude ENOENT` — set `CLAUDE_BIN` to fix. The startup log prints the
   resolved path (`[claudenav] using claude binary: …`).
+- **Auth failures in headless turns**: an expired/revoked OAuth token surfaces
+  as API 401 text in the stream (sometimes with exit 0 — the failure only lands
+  in the transcript). `drainQueue` matches it (`AUTH_ERR_RE`, stdout + stderr)
+  and sets a "re-login via `/login`" chat error instead of a bare exit code;
+  the auth message wins even when the CLI exits clean. Fix is user-side:
+  `claude` → `/login` in a terminal, then retry.
 - The Markdown renderer uses **space-delimited** placeholders (` CB0 `, ` IMG… `);
   an earlier edit corrupted these to null bytes and made the file read as binary —
   keep them spaces.

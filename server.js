@@ -869,6 +869,12 @@ function pauseForQuestion(sessionId) {
   try { entry.child.kill('SIGTERM'); } catch {}
 }
 
+// Auth failures don't crash the CLI cleanly — they surface as API 401 text in
+// the stream (and sometimes exit 0 with the failure written to the transcript).
+// Match those so the UI can say "re-login" instead of a bare exit code.
+const AUTH_ERR_RE = /API Error: 401|invalid authentication|invalid api key|authentication_error|OAuth token (?:has )?(?:expired|been revoked)|please run \/login/i;
+const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal, run `claude`, then `/login` to re-authenticate, and retry';
+
 function drainQueue(sessionId) {
   if (runningChats.has(sessionId)) return;
   const q = chatQueues.get(sessionId);
@@ -905,16 +911,23 @@ function drainQueue(sessionId) {
 
   let buf = '';
   let stderrTail = '';
+  let sawAuthError = false;
   child.stdout.on('data', chunk => {
     buf += chunk.toString();
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-      if (line.trim()) ingestStreamLine(sessionId, line);
+      if (line.trim()) {
+        if (!sawAuthError && AUTH_ERR_RE.test(line)) sawAuthError = true;
+        ingestStreamLine(sessionId, line);
+      }
     }
     if (buf.length > (1 << 20)) buf = buf.slice(-(1 << 16)); // guard a pathological no-newline line
   });
-  child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk.toString()).slice(-2000); });
+  child.stderr.on('data', chunk => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
+    if (!sawAuthError && AUTH_ERR_RE.test(stderrTail)) sawAuthError = true;
+  });
 
   const finish = (err) => {
     const entry = runningChats.get(sessionId);
@@ -922,8 +935,12 @@ function drainQueue(sessionId) {
     if (entry.timer) clearTimeout(entry.timer);
     runningChats.delete(sessionId);
     livePartial.delete(sessionId);
-    if (err && !entry.killed) {
-      lastChatError.set(sessionId, (stderrTail || err.message || 'turn failed').trim().slice(0, 500));
+    // Auth failure wins even on exit 0: the CLI sometimes exits clean after
+    // writing the 401 to the transcript, and "exited with code 1" (or silence)
+    // isn't actionable — tell the user to re-login instead.
+    if (!entry.killed && (err || sawAuthError)) {
+      const msg = sawAuthError ? AUTH_ERR_MSG : (stderrTail || err.message || 'turn failed');
+      lastChatError.set(sessionId, msg.trim().slice(0, 500));
     }
     drainQueue(sessionId); // start the next queued turn, if any
   };
