@@ -15,7 +15,20 @@ LOG="${CLAUDENAV_LOG:-/tmp/claudenav.log}"
 
 # Probe the cheapest real endpoint. --max-time guards against a hung socket that
 # accepts the connection but never responds; -f makes non-2xx a failure.
-if curl -fsS --max-time 5 "http://$HOST:$PORT/api/version" >/dev/null 2>&1; then
+if v=$(curl -fsS --max-time 5 "http://$HOST:$PORT/api/version" 2>/dev/null); then
+  # Reachable — but is it stale? A commit on disk that the running process
+  # predates shows up as head != bootHead (the UI's manual "relaunch" case).
+  # Auto-apply it via the server's own graceful relaunch (/api/update, exit 42)
+  # so committing is enough to deploy; in-flight turns are the same casualty
+  # they'd be with the UI button. grep is case-sensitive, so '"head"' does not
+  # match '"bootHead"'; a null/absent hash yields "" and skips the restart.
+  head=$(printf '%s' "$v" | grep -o '"head":"[^"]*"' | cut -d'"' -f4)
+  boot=$(printf '%s' "$v" | grep -o '"bootHead":"[^"]*"' | cut -d'"' -f4)
+  if [ -n "$head" ] && [ -n "$boot" ] && [ "$head" != "$boot" ]; then
+    echo "=== $(date '+%Y-%m-%d %H:%M:%S') watchdog: stale code (running $boot, disk at $head) — relaunching ===" >> "$LOG"
+    curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+      -d '{"pull":false}' "http://$HOST:$PORT/api/update" >/dev/null 2>>"$LOG"
+  fi
   exit 0
 fi
 

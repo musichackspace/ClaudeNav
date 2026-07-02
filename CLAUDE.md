@@ -42,8 +42,12 @@ runs `watchdog.sh` every 60s (`CLAUDENAV_WATCHDOG_INTERVAL` to change). It pings
 `/api/version`; if the server is unreachable it `launchctl kickstart -k`s the
 main agent. This covers the two cases `KeepAlive` can't: a **hung** server
 (process alive, not serving) and a **crash-cap give-up** (`run-server.sh` exits
-0, so launchd won't relaunch). A healthy check is a silent no-op; a restart logs
-to `/tmp/claudenav.log`. `uninstall` removes both agents.
+0, so launchd won't relaunch). It also auto-applies **stale code**: when the
+reply shows `head != bootHead` (a new commit on disk that the running process
+predates), it POSTs `/api/update {pull:false}` — the server's graceful exit-42
+relaunch — so committing is enough to deploy; no UI click needed. A healthy
+check is a silent no-op; a restart logs to `/tmp/claudenav.log`. `uninstall`
+removes both agents.
 
 > **Do NOT rely on `nohup … & disown` when launched from inside a tool wrapper.**
 > Processes spawned by a tool call (incl. via `nohup`/`disown`/`setsid`) get
