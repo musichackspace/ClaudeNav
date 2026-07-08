@@ -781,19 +781,24 @@ const lastChatErrorKind = new Map(); // sessionId -> 'auth' | 'usage' | null (fo
 // so the browser can show progress before the transcript file is finalized.
 const livePartial = new Map();  // sessionId -> { text, tools, updatedAt }
 
-const IMG_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+const ATTACH_EXT = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
+  'application/pdf': 'pdf',
+};
 
-// Decode a base64 data URL to a file in UPLOADS_DIR; returns its absolute path.
-function saveImage(dataUrl) {
-  const m = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(dataUrl || '');
+// Decode a base64 data URL to a file in UPLOADS_DIR; returns { path, mime } or null.
+// Accepts images and PDFs — the CLI's Read tool handles both.
+function saveAttachment(dataUrl) {
+  const m = /^data:(image\/[\w.+-]+|application\/pdf);base64,(.+)$/.exec(dataUrl || '');
   if (!m) return null;
-  const ext = IMG_EXT[m[1]] || 'png';
+  const mime = m[1];
+  const ext = ATTACH_EXT[mime] || 'bin';
   const buf = Buffer.from(m[2], 'base64');
   if (!buf.length || buf.length > 20 * 1024 * 1024) return null; // 20MB cap
   const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
   const fp = path.join(UPLOADS_DIR, name);
   fs.writeFileSync(fp, buf);
-  return fp;
+  return { path: fp, mime };
 }
 
 // Enqueue a turn. Turns for one session always run one-at-a-time, in order, so
@@ -802,8 +807,8 @@ function saveImage(dataUrl) {
 // it always continues from the newest state.)
 function chatTurn(sessionId, text, images, newCwd, cb) {
   if (!/^[\w-]+$/.test(sessionId || '')) return cb(new Error('bad session id'));
-  const imgPaths = (Array.isArray(images) ? images : []).map(saveImage).filter(Boolean);
-  if ((!text || !text.trim()) && !imgPaths.length) return cb(new Error('empty message'));
+  const attachments = (Array.isArray(images) ? images : []).map(saveAttachment).filter(Boolean);
+  if ((!text || !text.trim()) && !attachments.length) return cb(new Error('empty message'));
 
   // Existing session: resume from its *launch* dir (firstCwd), not the last cwd
   // recorded in the transcript. `claude --resume` scopes its session lookup to
@@ -824,10 +829,11 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
   else { cwd = newCwd || ''; }
   if (!cwd || !fs.existsSync(cwd)) return cb(new Error('working directory is missing'));
 
-  // Reference each image by absolute path; Claude reads it with the Read tool.
+  // Reference each attachment by absolute path; Claude reads it with the Read tool.
   let prompt = (text || '').trim();
-  if (imgPaths.length) {
-    prompt += (prompt ? '\n\n' : '') + imgPaths.map(p => `[Attached image: ${p}]`).join('\n');
+  if (attachments.length) {
+    prompt += (prompt ? '\n\n' : '') + attachments.map(a =>
+      `[Attached ${a.mime === 'application/pdf' ? 'PDF' : 'image'}: ${a.path}]`).join('\n');
   }
 
   if (!chatQueues.has(sessionId)) chatQueues.set(sessionId, []);
@@ -1822,7 +1828,7 @@ const server = http.createServer((req, res) => {
     return fs.readFile(fp, (e, buf) => {
       if (e) { res.writeHead(404); return res.end('not found'); }
       const ext = path.extname(fp).slice(1).toLowerCase();
-      const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+      const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf' };
       res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'max-age=3600' });
       res.end(buf);
     });
