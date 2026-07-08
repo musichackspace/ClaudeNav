@@ -63,10 +63,19 @@ removes both agents.
   (`--resume`, or `--session-id` to create a new one), via
   `--output-format stream-json --verbose` so blocks can be previewed live.
   Queued one-at-a-time per session; `cwd` is only used when creating. The
-  `images` array holds data URLs for attachments — images (png/jpeg/gif/webp)
-  **and PDFs** (`application/pdf`); each is saved to disk and referenced by
-  path in the prompt (`[Attached image: …]` / `[Attached PDF: …]`), which the
-  CLI's Read tool then opens.
+  `images` array (legacy name) holds attachments as `{data, name}` — `data` is a
+  base64 data URL, `name` the original filename. Type is decided by the filename
+  extension (browser MIME is unreliable for source/Office files), giving four
+  kinds: **images** (png/jpeg/gif/webp), **PDFs**, **text/source** (txt, md,
+  csv, json, and code — py/js/ts/go/… , see `TEXT_EXTS`), and **Office docs**
+  (docx/xlsx/pptx). Each is saved to `~/.claude/claudenav-uploads` as
+  `<ts>-<rand>-<sanitized name>` and referenced by path in the prompt
+  (`[Attached image|PDF|file: …]`) for the CLI's Read tool. Conversions happen
+  server-side at save time: **HEIC/HEIF → JPEG** via `sips`; **Office → text**
+  (docx via `textutil`; xlsx/pptx by pulling text nodes from the OOXML zip with
+  `unzip -p` — best-effort, layout/formulas dropped). Both need the macOS
+  built-ins; extraction failures fall back to a placeholder note. Unsupported
+  types are rejected client-side with a warning toast.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
   usageLimited, partial}`. `partial` is the in-flight assistant output
   (`{text, tools}`, block-level — the CLI doesn't stream tokens) or `null`.

@@ -781,24 +781,89 @@ const lastChatErrorKind = new Map(); // sessionId -> 'auth' | 'usage' | null (fo
 // so the browser can show progress before the transcript file is finalized.
 const livePartial = new Map();  // sessionId -> { text, tools, updatedAt }
 
-const ATTACH_EXT = {
-  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
-  'application/pdf': 'pdf',
-};
+// Attachments are classified by the file's extension (browser MIME types are
+// unreliable for source files and Office docs), which also decides how the CLI
+// consumes them: images/PDFs are Read directly; HEIC is transcoded to JPEG;
+// Office docs are extracted to text; plain text/source files are Read as-is.
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif']);
+const OFFICE_EXTS = new Set(['docx', 'xlsx', 'pptx']);
+const TEXT_EXTS = new Set([
+  'txt', 'md', 'markdown', 'log', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml',
+  'xml', 'html', 'htm', 'css', 'scss', 'less', 'js', 'jsx', 'mjs', 'cjs', 'ts',
+  'tsx', 'py', 'rb', 'go', 'rs', 'java', 'kt', 'c', 'h', 'cpp', 'cc', 'hpp',
+  'cs', 'php', 'swift', 'sh', 'bash', 'zsh', 'sql', 'toml', 'ini', 'cfg',
+  'conf', 'env', 'properties', 'gradle', 'r', 'lua', 'pl', 'dart', 'ex', 'exs',
+  'vue', 'svelte', 'make', 'mk', 'dockerfile', 'gitignore',
+]);
 
-// Decode a base64 data URL to a file in UPLOADS_DIR; returns { path, mime } or null.
-// Accepts images and PDFs — the CLI's Read tool handles both.
-function saveAttachment(dataUrl) {
-  const m = /^data:(image\/[\w.+-]+|application\/pdf);base64,(.+)$/.exec(dataUrl || '');
+function extOf(name) { const m = /\.([A-Za-z0-9]+)$/.exec(name || ''); return m ? m[1].toLowerCase() : ''; }
+
+// image | pdf | file (text/office) | null (unsupported).
+function attachKind(name) {
+  const ext = extOf(name);
+  if (IMAGE_EXTS.has(ext)) return 'image';
+  if (ext === 'pdf') return 'pdf';
+  if (OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext)) return 'file';
+  return null;
+}
+
+const decodeXml = s => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+  .replace(/&amp;/g, '&');
+
+// Extract readable text from an OOXML file. docx via macOS `textutil`; xlsx/pptx
+// are zip archives — pull the text nodes out of the relevant XML members with
+// `unzip -p`. Best-effort: layout/formulas are dropped, cell/slide text is kept.
+function officeToText(fp, ext) {
+  const BUF = { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 };
+  if (ext === 'docx') return execFileSync('textutil', ['-convert', 'txt', '-stdout', fp], BUF);
+  const members = ext === 'xlsx' ? ['xl/sharedStrings.xml'] : ['ppt/slides/slide*.xml'];
+  let xml = '';
+  for (const mem of members) { try { xml += execFileSync('unzip', ['-p', fp, mem], BUF); } catch {} }
+  const nodes = [...xml.matchAll(/<(?:a:)?t\b[^>]*>([\s\S]*?)<\/(?:a:)?t>/g)].map(m => decodeXml(m[1]));
+  return nodes.join('\n').trim();
+}
+
+// Decode a data URL to a file in UPLOADS_DIR, converting as needed. `name` is the
+// original filename (drives type detection and the readable disk name). Returns
+// { path, kind } or null. The disk name is `<ts>-<rand>-<sanitized original>` so
+// the UI can strip the prefix and show the real filename.
+function saveAttachment(att) {
+  const dataUrl = att && att.data, origName = (att && att.name) || 'file';
+  const kind = attachKind(origName);
+  if (!kind) return null;
+  const m = /^data:[^;,]*;base64,(.+)$/.exec(dataUrl || '');
   if (!m) return null;
-  const mime = m[1];
-  const ext = ATTACH_EXT[mime] || 'bin';
-  const buf = Buffer.from(m[2], 'base64');
+  const buf = Buffer.from(m[1], 'base64');
   if (!buf.length || buf.length > 20 * 1024 * 1024) return null; // 20MB cap
-  const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
-  const fp = path.join(UPLOADS_DIR, name);
-  fs.writeFileSync(fp, buf);
-  return { path: fp, mime };
+
+  const ext = extOf(origName);
+  const safe = origName.replace(/[^\w.-]+/g, '_').replace(/^_+/, '').slice(-80) || 'file';
+  const prefix = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-`;
+  const write = (diskName, contents) => {
+    const fp = path.join(UPLOADS_DIR, prefix + diskName);
+    fs.writeFileSync(fp, contents);
+    return fp;
+  };
+
+  try {
+    if (ext === 'heic' || ext === 'heif') {
+      // Browsers can't display HEIC and Read expects a common format — transcode.
+      const src = write(safe, buf);
+      const out = src.replace(/\.(heic|heif)$/i, '') + '.jpg';
+      execFileSync('sips', ['-s', 'format', 'jpeg', src, '--out', out]);
+      fs.unlinkSync(src);
+      return { path: out, kind: 'image' };
+    }
+    if (OFFICE_EXTS.has(ext)) {
+      const src = write(safe, buf);
+      let text = '';
+      try { text = officeToText(src, ext); } catch {}
+      fs.unlinkSync(src);
+      return { path: write(`${safe}.txt`, text || `(could not extract text from ${origName})`), kind: 'file' };
+    }
+    return { path: write(safe, buf), kind };
+  } catch { return null; }
 }
 
 // Enqueue a turn. Turns for one session always run one-at-a-time, in order, so
@@ -830,10 +895,11 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
   if (!cwd || !fs.existsSync(cwd)) return cb(new Error('working directory is missing'));
 
   // Reference each attachment by absolute path; Claude reads it with the Read tool.
+  const MARKER = { image: 'image', pdf: 'PDF', file: 'file' };
   let prompt = (text || '').trim();
   if (attachments.length) {
     prompt += (prompt ? '\n\n' : '') + attachments.map(a =>
-      `[Attached ${a.mime === 'application/pdf' ? 'PDF' : 'image'}: ${a.path}]`).join('\n');
+      `[Attached ${MARKER[a.kind]}: ${a.path}]`).join('\n');
   }
 
   if (!chatQueues.has(sessionId)) chatQueues.set(sessionId, []);
@@ -1828,7 +1894,12 @@ const server = http.createServer((req, res) => {
     return fs.readFile(fp, (e, buf) => {
       if (e) { res.writeHead(404); return res.end('not found'); }
       const ext = path.extname(fp).slice(1).toLowerCase();
-      const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf' };
+      const types = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+        webp: 'image/webp', pdf: 'application/pdf',
+        txt: 'text/plain', md: 'text/plain', csv: 'text/plain', log: 'text/plain',
+        json: 'application/json', xml: 'application/xml', html: 'text/plain',
+      };
       res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'max-age=3600' });
       res.end(buf);
     });
