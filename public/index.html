@@ -1521,8 +1521,15 @@ async function checkChatStatus() {
       clearStreaming();
     }
     if (j.error && !j.running) {
-      toast('Turn error: ' + j.error, true,
-        j.needsLogin ? { label: 'Re-login', fn: openLoginTerminal } : null);
+      if (j.usageLimited) {
+        // Not a crash — the server already phrased it as plain, actionable
+        // guidance (with a reset time when known). Show it as-is, no scary
+        // "Turn error:" prefix, and let it linger so it's readable.
+        toast(j.error, true, { label: 'Dismiss', fn: () => {} });
+      } else {
+        toast('Turn error: ' + j.error, true,
+          j.needsLogin ? { label: 'Re-login', fn: openLoginTerminal } : null);
+      }
     }
   } catch {}
 }

@@ -64,10 +64,13 @@ removes both agents.
   `--output-format stream-json --verbose` so blocks can be previewed live.
   Queued one-at-a-time per session; `cwd` is only used when creating.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
-  partial}`. `partial` is the in-flight assistant output (`{text, tools}`,
-  block-level — the CLI doesn't stream tokens) or `null`. `needsLogin` is true
-  when `error` is the auth-failure message; the UI then adds a "Re-login"
-  button to the error toast (opens a terminal via `/api/open {login:true}`).
+  usageLimited, partial}`. `partial` is the in-flight assistant output
+  (`{text, tools}`, block-level — the CLI doesn't stream tokens) or `null`.
+  `needsLogin` is true on an auth failure; the UI then adds a "Re-login" button
+  to the error toast (opens a terminal via `/api/open {login:true}`).
+  `usageLimited` is true when the turn hit a usage/rate limit; the UI shows the
+  server's plain-language `error` (which names the reset time when known, and
+  suggests switching to a lighter model) without the scary "Turn error:" prefix.
 - `POST /api/chat-cancel {session}` — SIGTERM the running turn (marked so it
   isn't logged as an error) and drop anything queued behind it.
 - `POST /api/session-mode {session, mode}` — pin the permission mode the next
@@ -162,6 +165,17 @@ removes both agents.
   and sets a "re-login via `/login`" chat error instead of a bare exit code;
   the auth message wins even when the CLI exits clean. Fix is user-side:
   `claude` → `/login` in a terminal, then retry.
+- **Usage/rate limits in headless turns**: hitting your token quota surfaces as
+  a 429 or a "usage limit reached" line (often with exit 0, like auth), which
+  would otherwise show as a bare "exited 1". `drainQueue` matches it
+  (`USAGE_ERR_RE`) and sets a plain-language chat error via `usageErrorMessage`
+  — including the reset time (parsed from the CLI's `…reached|<epoch>` form, else
+  the soonest `resets_at` from the cached `/api/usage` bars) and a nudge to
+  switch to a lighter model. Precedence in `finish()` is auth > usage > generic.
+  The usage check is gated to **non-`assistant` stream lines** because the
+  phrases "rate limit"/"usage limit" show up constantly in normal assistant
+  prose and would false-positive; genuine limits arrive on `result`/`system`
+  lines or stderr. Surfaced to the UI as `usageLimited` on `/api/chat-status`.
 - The Markdown renderer uses **space-delimited** placeholders (` CB0 `, ` IMG… `);
   an earlier edit corrupted these to null bytes and made the file read as binary —
   keep them spaces.
