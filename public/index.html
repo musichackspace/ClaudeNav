@@ -391,6 +391,16 @@
     border-radius: 50%; background: var(--panel2); border: 1px solid var(--border);
     color: var(--text); font-size: 13px; line-height: 1; cursor: pointer;
   }
+  .pdfthumb {
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    height: 56px; width: 56px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel2); font-size: 11px; color: var(--text);
+  }
+  .pdfchip {
+    display: inline-flex; align-items: center; gap: 4px; margin: 6px 0;
+    padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text); text-decoration: none; font-size: 13px;
+  }
 
   /* Current-work dashboard */
   .dash { width: min(820px, 95%); }
@@ -702,9 +712,11 @@ function md(src) {
   });
   // 2. Escape everything else.
   src = esc(src);
-  // 3. Attached-image markers -> <img>.
+  // 3. Attached-image markers -> <img>; attached-PDF markers -> a link.
   src = src.replace(/\[Attached image: ([^\]]+)\]/g, (_, p) =>
     ` IMG${encodeURIComponent(p.split('/').pop())} `);
+  src = src.replace(/\[Attached PDF: ([^\]]+)\]/g, (_, p) =>
+    ` PDF${encodeURIComponent(p.split('/').pop())} `);
   // 4. Inline formatting. Links are stashed as opaque ` LNKn ` tokens (like code
   //    blocks) so the bare-URL autolinker can't re-process an href it already
   //    wrapped, and so block parsing leaves them intact until the final restore.
@@ -745,7 +757,9 @@ function md(src) {
     .replace(/ CB(\d+) /g, (_, i) => codeBlocks[+i])
     .replace(/ LNK(\d+) /g, (_, i) => links[+i])
     .replace(/ IMG([^ ]+) /g, (_, n) =>
-      `<a href="/uploads/${n}" target="_blank"><img class="chatimg" src="/uploads/${n}" alt="attachment"></a>`);
+      `<a href="/uploads/${n}" target="_blank"><img class="chatimg" src="/uploads/${n}" alt="attachment"></a>`)
+    .replace(/ PDF([^ ]+) /g, (_, n) =>
+      `<a class="pdfchip" href="/uploads/${n}" target="_blank">📄 ${decodeURIComponent(n)}</a>`);
   return html;
 }
 function termApp() { return document.getElementById('termApp').value; }
@@ -1276,10 +1290,10 @@ function renderCompose(p, s) {
     ? `<span class="hint">also open in a terminal — that's fine; each browser turn continues from the latest</span>` : '';
   el.innerHTML = `
     <div id="attach" class="attach"></div>
-    <textarea id="composeBox" placeholder="Message this session… paste or drop an image to attach (Enter to send, Shift+Enter for newline)"></textarea>
+    <textarea id="composeBox" placeholder="Message this session… paste or drop an image or PDF to attach (Enter to send, Shift+Enter for newline)"></textarea>
     <div class="row">
-      <button id="attachBtn" class="ghost" title="Attach image">📎</button>
-      <input id="fileInput" type="file" accept="image/*" multiple hidden>
+      <button id="attachBtn" class="ghost" title="Attach image or PDF">📎</button>
+      <input id="fileInput" type="file" accept="image/*,application/pdf" multiple hidden>
       ${liveNote}<span id="working" class="hint"></span>
       <button id="stopBtn" class="ghost stop" title="Stop the running turn and clear the queue" hidden>■ Stop</button>
       <button id="sendBtn">Send ▸</button>
@@ -1293,8 +1307,8 @@ function renderCompose(p, s) {
     if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); doSend(); }
   });
   box.addEventListener('paste', ev => {
-    const imgs = [...(ev.clipboardData?.items || [])].filter(i => i.type.startsWith('image/'));
-    if (imgs.length) { ev.preventDefault(); addFiles(imgs.map(i => i.getAsFile())); }
+    const atts = [...(ev.clipboardData?.items || [])].filter(i => isAttachable(i.type));
+    if (atts.length) { ev.preventDefault(); addFiles(atts.map(i => i.getAsFile())); }
   });
   box.addEventListener('dragover', ev => { ev.preventDefault(); });
   box.addEventListener('drop', ev => {
@@ -1304,8 +1318,12 @@ function renderCompose(p, s) {
   box.focus();
 }
 
+// Images and PDFs are attachable; both are readable by the CLI's Read tool.
+function isAttachable(type) { return type.startsWith('image/') || type === 'application/pdf'; }
+function isPdfData(src) { return typeof src === 'string' && src.startsWith('data:application/pdf'); }
+
 function addFiles(files) {
-  [...files].filter(Boolean).filter(f => f.type.startsWith('image/')).forEach(f => {
+  [...files].filter(Boolean).filter(f => isAttachable(f.type)).forEach(f => {
     const reader = new FileReader();
     reader.onload = () => { chat.attachments.push(reader.result); renderAttachments(); };
     reader.readAsDataURL(f);
@@ -1315,8 +1333,10 @@ function addFiles(files) {
 function renderAttachments() {
   const el = document.getElementById('attach');
   if (!el) return;
-  el.innerHTML = chat.attachments.map((src, i) =>
-    `<div class="thumb"><img src="${src}"><button data-rm="${i}" title="Remove">×</button></div>`).join('');
+  el.innerHTML = chat.attachments.map((src, i) => {
+    const preview = isPdfData(src) ? `<span class="pdfthumb" title="PDF">📄 PDF</span>` : `<img src="${src}">`;
+    return `<div class="thumb">${preview}<button data-rm="${i}" title="Remove">×</button></div>`;
+  }).join('');
   el.querySelectorAll('button[data-rm]').forEach(b => b.onclick = () => {
     chat.attachments.splice(+b.dataset.rm, 1); renderAttachments();
   });
@@ -1437,7 +1457,9 @@ function echoUser(text, images) {
   const body = document.getElementById('chatBody');
   if (!body) return;
   const ph = body.querySelector('.empty'); if (ph) ph.remove();
-  const imgs = (images || []).map(src => `<img class="chatimg" src="${src}" alt="attachment">`).join('');
+  const imgs = (images || []).map(src => isPdfData(src)
+    ? `<span class="pdfchip">📄 PDF</span>`
+    : `<img class="chatimg" src="${src}" alt="attachment">`).join('');
   body.insertAdjacentHTML('beforeend',
     `<div class="msg user optimistic"><div class="who">You</div>` +
     `${text ? `<div class="bubble">${md(text)}</div>` : ''}${imgs}</div>`);

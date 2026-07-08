@@ -62,7 +62,11 @@ removes both agents.
 - `POST /api/chat {session, text, images, cwd}` — run a headless turn
   (`--resume`, or `--session-id` to create a new one), via
   `--output-format stream-json --verbose` so blocks can be previewed live.
-  Queued one-at-a-time per session; `cwd` is only used when creating.
+  Queued one-at-a-time per session; `cwd` is only used when creating. The
+  `images` array holds data URLs for attachments — images (png/jpeg/gif/webp)
+  **and PDFs** (`application/pdf`); each is saved to disk and referenced by
+  path in the prompt (`[Attached image: …]` / `[Attached PDF: …]`), which the
+  CLI's Read tool then opens.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
   partial}`. `partial` is the in-flight assistant output (`{text, tools}`,
   block-level — the CLI doesn't stream tokens) or `null`. `needsLogin` is true
@@ -125,7 +129,7 @@ removes both agents.
   it instead opens the terminal running `claude /login` (from `$HOME`, no cwd
   needed) — the re-auth path for expired OAuth credentials, which is
   interactive-only and can't be run headlessly. `/uploads/<name>` — serves
-  pasted images.
+  pasted attachments (images and PDFs).
 - `GET /api/version` — `{bootId, bootHead, head, branch, dirty, behind, hasRemote,
   canUpdate}`. `bootId`/`bootHead` describe the running process; `head`/`behind`
   reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
