@@ -185,10 +185,13 @@ removes both agents.
   — including the reset time (parsed from the CLI's `…reached|<epoch>` form, else
   the soonest `resets_at` from the cached `/api/usage` bars) and a nudge to
   switch to a lighter model. Precedence in `finish()` is auth > usage > generic.
-  The usage check is gated to **non-`assistant` stream lines** because the
-  phrases "rate limit"/"usage limit" show up constantly in normal assistant
-  prose and would false-positive; genuine limits arrive on `result`/`system`
-  lines or stderr. Surfaced to the UI as `usageLimited` on `/api/chat-status`.
+  The usage check is gated by **`isUsageSignalLine`** because the phrases
+  "rate limit"/"usage limit" show up constantly in content the CLI streams:
+  `assistant` prose, `user` (tool_result) output, and — the subtle one — a
+  *successful* `result` line, whose `result` field just echoes the assistant's
+  final text. Only an **error `result`** (`is_error:true`, even on exit 0), a
+  `system` line, or stderr counts as a real signal. Surfaced to the UI as
+  `usageLimited` on `/api/chat-status`.
 - The Markdown renderer uses **space-delimited** placeholders (` CB0 `, ` IMG… `);
   an earlier edit corrupted these to null bytes and made the file read as binary —
   keep them spaces.
