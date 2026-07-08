@@ -96,6 +96,7 @@ function parseSessionFile(filePath, stat) {
   let firstTs = null;
   let lastTs = null;
   let cwd = null;
+  let firstCwd = null; // launch dir — the folder the CLI filed this transcript under (resume must run here)
   let gitBranch = null;
   let version = null;
   let sessionId = null;
@@ -120,7 +121,7 @@ function parseSessionFile(filePath, stat) {
 
     if (o.sessionId && !sessionId) sessionId = o.sessionId;
     if (o.permissionMode) permissionMode = o.permissionMode;
-    if (o.cwd) cwd = o.cwd;
+    if (o.cwd) { cwd = o.cwd; if (!firstCwd) firstCwd = o.cwd; }
     if (o.gitBranch) gitBranch = o.gitBranch;
     if (o.version) version = o.version;
     if (o.timestamp) {
@@ -194,6 +195,7 @@ function parseSessionFile(filePath, stat) {
     lastPrompt: lastPrompt || firstUserPrompt || '',
     firstUserPrompt: firstUserPrompt || '',
     cwd: cwd || '',
+    firstCwd: firstCwd || cwd || '',
     gitBranch: gitBranch || '',
     version: version || '',
     userMsgCount,
@@ -453,6 +455,14 @@ function buildShellCommand({ cwd, sessionId }) {
   return cmd;
 }
 
+// Re-login can't be headless (the OAuth flow is interactive-only), but we can
+// open a terminal with `claude /login` already running — the CLI executes a
+// slash command passed as the initial prompt. The echo is a fallback hint in
+// case a CLI version treats it as plain text instead.
+function buildLoginCommand() {
+  return `cd ${shQuote(os.homedir())} && echo 'Re-authenticating Claude — if login does not start automatically, type /login' && claude /login`;
+}
+
 function appleScriptFor(appName, shellCmd) {
   const q = osaQuote(shellCmd);
   if (appName === 'iTerm') {
@@ -487,9 +497,9 @@ function openUrl(rawUrl, cb) {
   execFile(cmd, args, (err) => err ? cb(new Error(err.message)) : cb(null, { opened: u.href }));
 }
 
-function openTerminal({ cwd, sessionId, app }, cb) {
-  if (!cwd) return cb(new Error('missing cwd'));
-  const shellCmd = buildShellCommand({ cwd, sessionId });
+function openTerminal({ cwd, sessionId, app, login }, cb) {
+  if (!login && !cwd) return cb(new Error('missing cwd'));
+  const shellCmd = login ? buildLoginCommand() : buildShellCommand({ cwd, sessionId });
   const script = appleScriptFor(app === 'iTerm' ? 'iTerm' : 'Terminal', shellCmd);
   execFile('osascript', ['-e', script], (err, stdout, stderr) => {
     if (err) return cb(new Error(stderr || err.message));
@@ -766,6 +776,7 @@ const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_TURN_TIMEOUT_MS) || 15 * 60 * 
 const runningChats = new Map(); // sessionId -> { child, startedAt, timer, killed }
 const chatQueues = new Map();   // sessionId -> [text, ...] turns waiting their turn
 const lastChatError = new Map(); // sessionId -> error string
+const lastChatErrorKind = new Map(); // sessionId -> 'auth' | 'usage' | null (for structured UI flags)
 // Live (in-flight) assistant output for a running turn, surfaced via chat-status
 // so the browser can show progress before the transcript file is finalized.
 const livePartial = new Map();  // sessionId -> { text, tools, updatedAt }
@@ -794,11 +805,22 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
   const imgPaths = (Array.isArray(images) ? images : []).map(saveImage).filter(Boolean);
   if ((!text || !text.trim()) && !imgPaths.length) return cb(new Error('empty message'));
 
-  // Existing session: use its recorded cwd. New session (no file yet): use the
-  // cwd the caller passed — drainQueue will create it with --session-id.
+  // Existing session: resume from its *launch* dir (firstCwd), not the last cwd
+  // recorded in the transcript. `claude --resume` scopes its session lookup to
+  // the project slug of the cwd it runs in, and the CLI filed this transcript
+  // under the dir the session started in. If the conversation later cd'd into a
+  // subfolder, the last-seen cwd points at a different (empty) project slug and
+  // resume fails with "No conversation found with session ID". New session (no
+  // file yet): use the cwd the caller passed — drainQueue creates it via
+  // --session-id.
   const fp = findSessionFile(sessionId);
   let cwd = '';
-  if (fp) { try { cwd = parseSessionFile(fp, fs.statSync(fp)).cwd; } catch {} }
+  if (fp) {
+    try {
+      const d = parseSessionFile(fp, fs.statSync(fp));
+      cwd = d.firstCwd || d.cwd;
+    } catch {}
+  }
   else { cwd = newCwd || ''; }
   if (!cwd || !fs.existsSync(cwd)) return cb(new Error('working directory is missing'));
 
@@ -856,12 +878,56 @@ function pauseForQuestion(sessionId) {
   try { entry.child.kill('SIGTERM'); } catch {}
 }
 
+// Auth failures don't crash the CLI cleanly — they surface as API 401 text in
+// the stream (and sometimes exit 0 with the failure written to the transcript).
+// Match those so the UI can say "re-login" instead of a bare exit code.
+const AUTH_ERR_RE = /API Error: 401|invalid authentication|invalid api key|authentication_error|OAuth token (?:has )?(?:expired|been revoked)|please run \/login/i;
+const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal, run `claude`, then `/login` to re-authenticate, and retry';
+
+// Usage/rate limits are the other "not your fault, and a bare exit code is
+// useless" failure. The CLI reports them as a 429 or a "usage limit reached"
+// line (sometimes exiting 0 after writing it to the transcript). Match those so
+// the UI can say "you're out of tokens, resets <when>" instead of "exited 1".
+const USAGE_ERR_RE = /usage limit reached|rate.?limit|rate_limit_error|API Error: 429|too many requests|quota (?:exceeded|reached)|\b\d+-hour limit reached|weekly limit reached/i;
+
+// Render an epoch (seconds or ms) as a friendly local time, or null if unusable.
+function formatResetTime(epochLike) {
+  let ms = Number(epochLike);
+  if (!isFinite(ms) || ms <= 0) return null;
+  if (ms < 1e12) ms *= 1000;                // seconds -> ms
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+// Friendly, actionable message for a usage-limit hit. Prefers a reset time
+// parsed from the CLI's "…reached|<epoch>" form, else the soonest reset from
+// the cached /usage bars.
+function usageErrorMessage(line) {
+  let reset = null;
+  const m = /\|(\d{9,13})\b/.exec(line || '');
+  if (m) reset = formatResetTime(m[1]);
+  if (!reset && usageState.data) {
+    const soonest = [usageState.data.session, usageState.data.weeklyAll, usageState.data.weeklyScoped]
+      .filter((b) => b && b.resets_at)
+      .map((b) => Date.parse(b.resets_at))
+      .filter((t) => isFinite(t))
+      .sort((a, b) => a - b)[0];
+    if (soonest) reset = formatResetTime(soonest);
+  }
+  const tail = 'This turn didn’t run. Retry after it resets, or switch this session to a lighter model.';
+  return reset
+    ? `You’ve reached your Claude usage limit — it resets ${reset}. ${tail}`
+    : `You’ve reached your Claude usage limit (see the usage bars up top). ${tail}`;
+}
+
 function drainQueue(sessionId) {
   if (runningChats.has(sessionId)) return;
   const q = chatQueues.get(sessionId);
   if (!q || !q.length) return;
   const { text, cwd } = q.shift();
   lastChatError.delete(sessionId);
+  lastChatErrorKind.delete(sessionId);
 
   // First turn of a brand-new session creates it at our chosen id; later turns
   // (and all turns of existing sessions) continue it. stream-json + --verbose
@@ -892,16 +958,32 @@ function drainQueue(sessionId) {
 
   let buf = '';
   let stderrTail = '';
+  let sawAuthError = false;
+  let sawUsageError = false;
+  let usageErrLine = '';                      // the matching line, for reset-time parsing
   child.stdout.on('data', chunk => {
     buf += chunk.toString();
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-      if (line.trim()) ingestStreamLine(sessionId, line);
+      if (line.trim()) {
+        if (!sawAuthError && AUTH_ERR_RE.test(line)) sawAuthError = true;
+        // Only flag a usage limit off non-assistant lines (the CLI reports it on
+        // a `result`/`system` line): the phrases "rate limit"/"usage limit"
+        // routinely appear in normal assistant prose and would false-positive.
+        if (!sawUsageError && !line.includes('"type":"assistant"') && USAGE_ERR_RE.test(line)) {
+          sawUsageError = true; usageErrLine = line;
+        }
+        ingestStreamLine(sessionId, line);
+      }
     }
     if (buf.length > (1 << 20)) buf = buf.slice(-(1 << 16)); // guard a pathological no-newline line
   });
-  child.stderr.on('data', chunk => { stderrTail = (stderrTail + chunk.toString()).slice(-2000); });
+  child.stderr.on('data', chunk => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
+    if (!sawAuthError && AUTH_ERR_RE.test(stderrTail)) sawAuthError = true;
+    if (!sawUsageError && USAGE_ERR_RE.test(stderrTail)) { sawUsageError = true; usageErrLine = stderrTail; }
+  });
 
   const finish = (err) => {
     const entry = runningChats.get(sessionId);
@@ -909,8 +991,19 @@ function drainQueue(sessionId) {
     if (entry.timer) clearTimeout(entry.timer);
     runningChats.delete(sessionId);
     livePartial.delete(sessionId);
-    if (err && !entry.killed) {
-      lastChatError.set(sessionId, (stderrTail || err.message || 'turn failed').trim().slice(0, 500));
+    // Auth failure wins even on exit 0: the CLI sometimes exits clean after
+    // writing the 401 to the transcript, and "exited with code 1" (or silence)
+    // isn't actionable — tell the user to re-login instead.
+    if (!entry.killed && (err || sawAuthError || sawUsageError)) {
+      // Auth (401) and usage (429/limit) both surface even on exit 0 and aren't
+      // actionable as a bare exit code — translate them into plain guidance.
+      // Auth wins over usage wins over a generic failure.
+      let msg, kind = null;
+      if (sawAuthError) { msg = AUTH_ERR_MSG; kind = 'auth'; }
+      else if (sawUsageError) { msg = usageErrorMessage(usageErrLine); kind = 'usage'; }
+      else { msg = stderrTail || err.message || 'turn failed'; }
+      lastChatError.set(sessionId, msg.trim().slice(0, 500));
+      if (kind) lastChatErrorKind.set(sessionId, kind); else lastChatErrorKind.delete(sessionId);
     }
     drainQueue(sessionId); // start the next queued turn, if any
   };
@@ -921,6 +1014,7 @@ function drainQueue(sessionId) {
   entry.timer = setTimeout(() => {
     entry.killed = true;
     lastChatError.set(sessionId, 'turn timed out and was stopped');
+    lastChatErrorKind.delete(sessionId);
     try { child.kill('SIGTERM'); } catch {}
   }, TURN_TIMEOUT_MS);
   runningChats.set(sessionId, entry);
@@ -940,6 +1034,7 @@ function chatCancel(sessionId, cb) {
     try { entry.child.kill('SIGTERM'); } catch {}
   }
   lastChatError.delete(sessionId);
+  lastChatErrorKind.delete(sessionId);
   cb(null, { stopped: !!entry, dropped });
 }
 
@@ -1845,6 +1940,10 @@ const server = http.createServer((req, res) => {
       running: runningChats.has(id) || queued > 0,
       queued,
       error: lastChatError.get(id) || null,
+      // Structured flags so the UI can react (offer "Re-login", soften the
+      // usage-limit toast) without pattern-matching the human-readable text.
+      needsLogin: lastChatErrorKind.get(id) === 'auth',
+      usageLimited: lastChatErrorKind.get(id) === 'usage',
       partial: lp ? { text: lp.text, tools: lp.tools, ask: lp.ask || null } : null,
     });
   }

@@ -153,8 +153,14 @@
     border-radius: 10px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50;
     max-width: 80vw;
   }
-  .toast.show { opacity: 1; }
+  .toast.show { opacity: 1; pointer-events: auto; }
   .toast.err { border-color: #f85149; color: #f85149; }
+  .toast button {
+    margin-left: 12px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+    background: var(--chip); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .toast.err button { border-color: #f85149; color: #f85149; }
   kbd { background: var(--chip); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
 
   /* Active-folder cards */
@@ -744,12 +750,45 @@ function md(src) {
 }
 function termApp() { return document.getElementById('termApp').value; }
 
-function toast(msg, isErr) {
+// Optional `action` = { label, fn } renders a button inside the toast (e.g.
+// "Re-login" on auth failures) and keeps it up longer. The status poll re-toasts
+// a persistent chat error every tick, so skip the rebuild when nothing changed —
+// otherwise the button is replaced every 2s and can eat the user's click.
+function toast(msg, isErr, action) {
   const t = document.getElementById('toast');
+  if (t.classList.contains('show') && t._msg === msg && !!t._hadAction === !!action) {
+    clearTimeout(t._t);
+    t._t = setTimeout(() => { t.className = 'toast'; t._msg = null; }, action ? 8000 : 3200);
+    return;
+  }
   t.textContent = msg;
+  t._msg = msg;
+  t._hadAction = !!action;
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = (e) => { e.stopPropagation(); t.className = 'toast'; t._msg = null; action.fn(); };
+    t.appendChild(b);
+  }
   t.className = 'toast show' + (isErr ? ' err' : '');
   clearTimeout(t._t);
-  t._t = setTimeout(() => { t.className = 'toast'; }, 3200);
+  t._t = setTimeout(() => { t.className = 'toast'; t._msg = null; }, action ? 8000 : 3200);
+}
+
+// Open a terminal with `claude /login` running — the fix for expired OAuth
+// credentials (the flow is interactive-only, so ClaudeNav can't run it itself).
+async function openLoginTerminal() {
+  try {
+    const r = await fetch('/api/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ login: true, app: termApp() }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    toast('Opened ' + termApp() + ' — finish /login there, then retry your message');
+  } catch (e) {
+    toast('Could not open terminal: ' + e.message, true);
+  }
 }
 
 async function openTerminal(payload) {
@@ -1481,7 +1520,17 @@ async function checkChatStatus() {
     } else if (!j.running) {
       clearStreaming();
     }
-    if (j.error && !j.running) toast('Turn error: ' + j.error, true);
+    if (j.error && !j.running) {
+      if (j.usageLimited) {
+        // Not a crash — the server already phrased it as plain, actionable
+        // guidance (with a reset time when known). Show it as-is, no scary
+        // "Turn error:" prefix, and let it linger so it's readable.
+        toast(j.error, true, { label: 'Dismiss', fn: () => {} });
+      } else {
+        toast('Turn error: ' + j.error, true,
+          j.needsLogin ? { label: 'Re-login', fn: openLoginTerminal } : null);
+      }
+    }
   } catch {}
 }
 
