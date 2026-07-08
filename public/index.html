@@ -1323,7 +1323,13 @@ function isAttachable(type) { return type.startsWith('image/') || type === 'appl
 function isPdfData(src) { return typeof src === 'string' && src.startsWith('data:application/pdf'); }
 
 function addFiles(files) {
-  [...files].filter(Boolean).filter(f => isAttachable(f.type)).forEach(f => {
+  const all = [...files].filter(Boolean);
+  const rejected = all.filter(f => !isAttachable(f.type));
+  if (rejected.length) {
+    const names = rejected.map(f => f.name || f.type || 'file').join(', ');
+    toast(`Can't attach ${names} — only images and PDFs are supported`, true);
+  }
+  all.filter(f => isAttachable(f.type)).forEach(f => {
     const reader = new FileReader();
     reader.onload = () => { chat.attachments.push(reader.result); renderAttachments(); };
     reader.readAsDataURL(f);
