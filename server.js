@@ -952,8 +952,9 @@ function pauseForQuestion(sessionId) {
 
 // Auth failures don't crash the CLI cleanly — they surface as API 401 text in
 // the stream (and sometimes exit 0 with the failure written to the transcript).
-// Match those so the UI can say "re-login" instead of a bare exit code. Gated by
-// isErrorSignalLine so a turn that merely *quotes* "/login" doesn't false-flag.
+// Match those so the UI can say "re-login" instead of a bare exit code. Only
+// matched against an error result's message / stderr (see errorSignalText) so a
+// turn that merely *quotes* "/login" in its output doesn't false-flag.
 const AUTH_ERR_RE = /API Error: 401|invalid authentication|invalid api key|authentication_error|OAuth token (?:has )?(?:expired|been revoked)|please run \/login/i;
 const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal, run `claude`, then `/login` to re-authenticate, and retry';
 
@@ -963,19 +964,22 @@ const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal
 // the UI can say "you're out of tokens, resets <when>" instead of "exited 1".
 const USAGE_ERR_RE = /usage limit reached|rate.?limit|rate_limit_error|API Error: 429|too many requests|quota (?:exceeded|reached)|\b\d+-hour limit reached|weekly limit reached/i;
 
-// Which stdout lines may legitimately carry a failure signal (auth OR usage).
-// Crucially NOT `assistant` prose, NOT `user` (tool_result) lines — both are
-// free-form content that routinely quotes phrases like "please run /login" or
-// "usage limit" — and NOT a *successful* `result` line, whose `result` field
-// just echoes the assistant's final text. Only an error `result`, a `system`
-// line, or an unparseable (stderr-like) line is a real signal. Without this, a
-// turn that merely *talks about* auth or usage limits (like this very feature's
-// sessions) false-positives into a phantom "Re-login"/"out of tokens" toast.
-function isErrorSignalLine(line) {
-  let o; try { o = JSON.parse(line); } catch { return true; }  // non-JSON → scan
-  if (o.type === 'assistant' || o.type === 'user') return false;
-  if (o.type === 'result') return !!o.is_error;
-  return true;                                                 // system / other
+// The ONLY stdout content that may carry a genuine auth/usage failure: an
+// *error* result's own message text. Everything the CLI streams — `assistant`
+// prose, `user` (tool_result) output, a *successful* `result` line (whose
+// `result` field just echoes the assistant's final text), `system` init lines,
+// and stray non-JSON diagnostics — routinely quotes "please run /login",
+// "usage limit reached", "429" etc. without being a real failure. Real
+// transcripts bear this out: every historical match was discussion, zero were
+// actual limits. So we scan nothing but the error-result message here (stderr,
+// the CLI's dedicated error channel, is scanned separately). Returns the text
+// to match against, or '' if this line can't be a signal.
+function errorSignalText(line) {
+  let o; try { o = JSON.parse(line); } catch { return ''; }    // non-JSON → ignore
+  if (o.type === 'result' && o.is_error) {
+    return typeof o.result === 'string' ? o.result : JSON.stringify(o);
+  }
+  return '';
 }
 
 // Render an epoch (seconds or ms) as a friendly local time, or null if unusable.
@@ -1055,13 +1059,13 @@ function drainQueue(sessionId) {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
       if (line.trim()) {
-        // Both auth and usage phrases show up constantly in assistant prose,
-        // tool output, and echoed result text — so only trust lines that
-        // genuinely carry an error signal (see isErrorSignalLine).
-        const signal = isErrorSignalLine(line);
-        if (signal && !sawAuthError && AUTH_ERR_RE.test(line)) sawAuthError = true;
-        if (signal && !sawUsageError && USAGE_ERR_RE.test(line)) {
-          sawUsageError = true; usageErrLine = line;
+        // Auth and usage phrases show up constantly in assistant prose, tool
+        // output, and echoed result text — so match only against an error
+        // result's own message (see errorSignalText), never the raw line.
+        const sig = errorSignalText(line);
+        if (sig) {
+          if (!sawAuthError && AUTH_ERR_RE.test(sig)) sawAuthError = true;
+          if (!sawUsageError && USAGE_ERR_RE.test(sig)) { sawUsageError = true; usageErrLine = sig; }
         }
         ingestStreamLine(sessionId, line);
       }

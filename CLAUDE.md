@@ -173,29 +173,28 @@ removes both agents.
   `spawn claude ENOENT` — set `CLAUDE_BIN` to fix. The startup log prints the
   resolved path (`[claudenav] using claude binary: …`).
 - **Auth failures in headless turns**: an expired/revoked OAuth token surfaces
-  as API 401 text in the stream (sometimes with exit 0 — the failure only lands
-  in the transcript). `drainQueue` matches it (`AUTH_ERR_RE`, stdout + stderr)
-  and sets a "re-login via `/login`" chat error instead of a bare exit code;
-  the auth message wins even when the CLI exits clean. Like the usage check, the
-  match is gated by **`isErrorSignalLine`** — a turn that merely *quotes*
-  "please run /login" (in prose, tool output, or a successful `result` echo)
-  must not trip a phantom "Re-login". Fix is user-side: `claude` → `/login` in a
-  terminal, then retry.
+  as API 401 text (`AUTH_ERR_RE`), sometimes with exit 0 (the failure lands in
+  an error `result`). `drainQueue` matches it and sets a "re-login via `/login`"
+  chat error instead of a bare exit code; the auth message wins even when the
+  CLI exits clean. Fix is user-side: `claude` → `/login` in a terminal, retry.
 - **Usage/rate limits in headless turns**: hitting your token quota surfaces as
-  a 429 or a "usage limit reached" line (often with exit 0, like auth), which
-  would otherwise show as a bare "exited 1". `drainQueue` matches it
-  (`USAGE_ERR_RE`) and sets a plain-language chat error via `usageErrorMessage`
-  — including the reset time (parsed from the CLI's `…reached|<epoch>` form, else
-  the soonest `resets_at` from the cached `/api/usage` bars) and a nudge to
-  switch to a lighter model. Precedence in `finish()` is auth > usage > generic.
-  The usage check is gated by **`isErrorSignalLine`** (shared with the auth
-  check) because the phrases "rate limit"/"usage limit" show up constantly in
-  content the CLI streams:
-  `assistant` prose, `user` (tool_result) output, and — the subtle one — a
-  *successful* `result` line, whose `result` field just echoes the assistant's
-  final text. Only an **error `result`** (`is_error:true`, even on exit 0), a
-  `system` line, or stderr counts as a real signal. Surfaced to the UI as
-  `usageLimited` on `/api/chat-status`.
+  a 429 / "usage limit reached" (`USAGE_ERR_RE`), often with exit 0 like auth.
+  `drainQueue` sets a plain-language chat error via `usageErrorMessage` — with
+  the reset time (parsed from the CLI's `…reached|<epoch>` form, else the
+  soonest `resets_at` from the cached `/api/usage` bars) and a nudge to switch
+  to a lighter model. Precedence in `finish()` is auth > usage > generic;
+  surfaced as `usageLimited`/`needsLogin` on `/api/chat-status`.
+- **Both checks match ONLY an error signal, never streamed content** (see
+  `errorSignalText`): the sole stdout source is an **error `result`**'s own
+  message (`type:"result"` + `is_error:true`, even on exit 0); the other is
+  **stderr**. Assistant prose, `user` (tool_result) output, *successful* result
+  echoes (whose `result` field just repeats the assistant's final text),
+  `system` init lines, and stray non-JSON diagnostics are all ignored — they
+  quote "usage limit reached"/"please run /login"/"429" constantly without being
+  real failures (real transcripts show *every* historical match was discussion,
+  zero were actual limits). This precision is the whole ballgame: earlier
+  versions scanned the raw stream and cried wolf on any turn that merely
+  *discussed* limits or auth.
 - The Markdown renderer uses **space-delimited** placeholders (` CB0 `, ` IMG… `);
   an earlier edit corrupted these to null bytes and made the file read as binary —
   keep them spaces.
