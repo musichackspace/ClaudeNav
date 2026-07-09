@@ -176,8 +176,11 @@ removes both agents.
   as API 401 text in the stream (sometimes with exit 0 — the failure only lands
   in the transcript). `drainQueue` matches it (`AUTH_ERR_RE`, stdout + stderr)
   and sets a "re-login via `/login`" chat error instead of a bare exit code;
-  the auth message wins even when the CLI exits clean. Fix is user-side:
-  `claude` → `/login` in a terminal, then retry.
+  the auth message wins even when the CLI exits clean. Like the usage check, the
+  match is gated by **`isErrorSignalLine`** — a turn that merely *quotes*
+  "please run /login" (in prose, tool output, or a successful `result` echo)
+  must not trip a phantom "Re-login". Fix is user-side: `claude` → `/login` in a
+  terminal, then retry.
 - **Usage/rate limits in headless turns**: hitting your token quota surfaces as
   a 429 or a "usage limit reached" line (often with exit 0, like auth), which
   would otherwise show as a bare "exited 1". `drainQueue` matches it
@@ -185,8 +188,9 @@ removes both agents.
   — including the reset time (parsed from the CLI's `…reached|<epoch>` form, else
   the soonest `resets_at` from the cached `/api/usage` bars) and a nudge to
   switch to a lighter model. Precedence in `finish()` is auth > usage > generic.
-  The usage check is gated by **`isUsageSignalLine`** because the phrases
-  "rate limit"/"usage limit" show up constantly in content the CLI streams:
+  The usage check is gated by **`isErrorSignalLine`** (shared with the auth
+  check) because the phrases "rate limit"/"usage limit" show up constantly in
+  content the CLI streams:
   `assistant` prose, `user` (tool_result) output, and — the subtle one — a
   *successful* `result` line, whose `result` field just echoes the assistant's
   final text. Only an **error `result`** (`is_error:true`, even on exit 0), a
