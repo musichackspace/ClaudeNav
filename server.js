@@ -838,6 +838,15 @@ function officeToText(fp, ext) {
 // { path, kind } or null. The disk name is `<ts>-<rand>-<sanitized original>` so
 // the UI can strip the prefix and show the real filename.
 function saveAttachment(att) {
+  // Back-compat: older clients (notably the bundled desktop app) send a bare
+  // base64 data-URL string instead of { data, name }. Synthesize a filename
+  // from the data-URL's MIME so their image/PDF attachments still work.
+  if (typeof att === 'string') {
+    const mt = /^data:([\w.+-]+\/[\w.+-]+)/.exec(att);
+    const sub = mt ? mt[1].split('/')[1].toLowerCase() : 'bin';
+    const ext = ({ jpeg: 'jpg', 'svg+xml': 'svg', pdf: 'pdf' })[sub] || sub;
+    att = { data: att, name: `pasted.${ext}` };
+  }
   const dataUrl = att && att.data, origName = (att && att.name) || 'file';
   const kind = attachKind(origName);
   if (!kind) return null;
