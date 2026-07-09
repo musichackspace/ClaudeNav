@@ -1824,15 +1824,32 @@ function pagesInfo(nwo) {
 }
 
 // List the signed-in user's own repos, newest activity first — the picker for
-// "edit a site I already have on GitHub".
+// "edit a site I already have on GitHub". Lists every repo the user can
+// *access* — not just ones they own — via the affiliations endpoint, so repos
+// in orgs and repos they collaborate on show up too (e.g. an org-owned site).
+// `gh repo list` without an owner only returns the personal account's repos,
+// which silently hides org/collaborator repos; `user/repos?affiliation=…` is
+// the authoritative "everything I can touch" list.
 function ghListRepos(cb) {
   const status = ghStatus();
   if (!status.installed) return cb(new Error('the GitHub CLI (gh) is not installed'));
   if (!status.authed) return cb(new Error('not signed in to GitHub'));
   try {
-    const repos = JSON.parse(gh(['repo', 'list', '--limit', '200', '--source', '--no-archived',
-      '--json', 'name,nameWithOwner,description,visibility,url,pushedAt,isFork']) || '[]');
-    repos.sort((a, b) => String(b.pushedAt || '').localeCompare(String(a.pushedAt || '')));
+    const raw = JSON.parse(gh(['api',
+      'user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100',
+      '--paginate']) || '[]');
+    const repos = raw
+      .filter(r => !r.archived)
+      .map(r => ({
+        name: r.name,
+        nameWithOwner: r.full_name,
+        description: r.description,
+        visibility: r.private ? 'PRIVATE' : 'PUBLIC',
+        url: r.html_url,
+        pushedAt: r.pushed_at,
+        isFork: r.fork,
+      }))
+      .sort((a, b) => String(b.pushedAt || '').localeCompare(String(a.pushedAt || '')));
     cb(null, { owner: status.user, repos });
   } catch (e) { cb(new Error(ghErr(e))); }
 }

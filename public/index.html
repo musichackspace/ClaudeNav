@@ -271,6 +271,7 @@
   .imp-repo:hover { background: var(--panel); }
   .imp-repo.sel { background: rgba(88,166,255,.14); }
   .imp-repo .rn { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; }
+  .imp-repo .ro { color: var(--muted); font-weight: 400; }
   .imp-repo .rv { font-size: 10px; color: var(--muted); background: var(--chip); padding: 1px 6px; border-radius: 99px; font-weight: 400; }
   .imp-repo .rd { color: var(--muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .imp-empty { padding: 14px; color: var(--muted); font-size: 12.5px; text-align: center; }
@@ -2733,7 +2734,7 @@ document.getElementById('wizStartChat').addEventListener('click', () => {
 // ---- Import wizard (edit an existing GitHub site) -------------------------
 // Pick one of the user's repos → clone into $HOME → detect its live Pages URL →
 // hand off to chat. Publishing later is the same commit + push as any repo.
-let impState = { authed: false, repos: [], selected: null, done: null };
+let impState = { authed: false, user: null, repos: [], selected: null, done: null };
 
 function impShow(step) {
   for (const id of ['impPick', 'impWorking', 'impDone'])
@@ -2742,7 +2743,7 @@ function impShow(step) {
 function openImportWizard() {
   document.getElementById('impOverlay').classList.add('show');
   document.body.classList.add('overlay-open');
-  impState = { authed: false, repos: [], selected: null, done: null };
+  impState = { authed: false, user: null, repos: [], selected: null, done: null };
   impShow('impPick');
   document.getElementById('impSub').textContent = 'Pick a repository from your GitHub.';
   document.getElementById('impSearch').hidden = true;
@@ -2751,6 +2752,7 @@ function openImportWizard() {
   document.getElementById('impOpen').disabled = true;
   renderGhStatus(document.getElementById('impGh'), (s) => {
     impState.authed = !!s.authed;
+    impState.user = s.user || null;
     if (s.authed) impLoadRepos();
   });
 }
@@ -2778,13 +2780,17 @@ function impRenderRepos(filter) {
   const list = document.getElementById('impList');
   const q = (filter || '').toLowerCase();
   const rows = impState.repos.filter(r =>
-    !q || r.name.toLowerCase().includes(q) || (r.description || '').toLowerCase().includes(q));
+    !q || (r.nameWithOwner || '').toLowerCase().includes(q) || (r.description || '').toLowerCase().includes(q));
   if (!rows.length) { list.innerHTML = '<div class="imp-empty">No matching repositories.</div>'; return; }
-  list.innerHTML = rows.map(r =>
-    `<div class="imp-repo" data-nwo="${esc(r.nameWithOwner)}">
-       <div class="rn">${esc(r.name)}<span class="rv">${esc(r.visibility || '').toLowerCase()}</span></div>
+  list.innerHTML = rows.map(r => {
+    const owner = (r.nameWithOwner || '').split('/')[0];
+    // Show the owner when it's not your own account (org / collaborator repos).
+    const ownerTag = owner && owner !== impState.user ? `<span class="ro">${esc(owner)}/</span>` : '';
+    return `<div class="imp-repo" data-nwo="${esc(r.nameWithOwner)}">
+       <div class="rn">${ownerTag}${esc(r.name)}<span class="rv">${esc((r.visibility || '').toLowerCase())}</span></div>
        ${r.description ? `<div class="rd">${esc(r.description)}</div>` : ''}
-     </div>`).join('');
+     </div>`;
+  }).join('');
 }
 
 document.getElementById('impList').addEventListener('click', (e) => {
