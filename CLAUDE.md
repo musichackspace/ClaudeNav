@@ -145,9 +145,12 @@ removes both agents.
   interactive: `POST /api/open {ghLogin:true}` opens a terminal running
   `gh auth login` (same pattern as the Claude `/login` re-auth).
 - `GET /api/gh-repos` — `{owner, repos:[{name, nameWithOwner, description,
-  visibility, url, pushedAt, isFork}]}` (own, non-archived sources, newest
-  activity first) — the picker for the wizard's **"edit a site I already have"**
-  path. `gh repo list`.
+  visibility, url, pushedAt, isFork}]}`, newest activity first — the picker for
+  the wizard's **"edit a site I already have"** path. Lists every repo the user
+  can *access* via `gh api user/repos?affiliation=owner,collaborator,organization_member`
+  (`--paginate`), **not** `gh repo list` (which only returns the personal
+  account's own repos and silently hides org/collaborator repos). Archived repos
+  filtered out; the row shows the owner prefix when it isn't your own account.
 - `POST /api/site-import {repo, parent?}` — `gh repo clone` an existing repo
   (`owner/name`) into a `$HOME`-bounded `<name>` folder, so it can be maintained
   + published from ClaudeNav. If that folder already IS this repo (same origin),
