@@ -236,6 +236,67 @@
   .np-actions { display: flex; gap: 10px; justify-content: flex-end; }
   .np-actions .primary { background: var(--accent); border-color: var(--accent); color: #1b1206; font-weight: 600; }
   .np-actions .primary:disabled { opacity: .5; cursor: not-allowed; }
+  /* New-project chooser + website wizard */
+  .pc-cards { display: grid; gap: 12px; padding: 4px 0 2px; }
+  .pc-card { display: flex; gap: 14px; align-items: flex-start; text-align: left; padding: 16px;
+             border: 1px solid var(--border); border-radius: 11px; background: var(--panel); cursor: pointer;
+             width: 100%; color: var(--text); font: inherit; }
+  .pc-card:hover { border-color: var(--accent); }
+  .pc-card .pc-ico { font-size: 26px; line-height: 1; }
+  .pc-card .pc-t { font-weight: 600; margin-bottom: 3px; }
+  .pc-card .pc-d { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .wiz { width: min(560px, 94%); }
+  .wiz-step { padding: 6px 0 2px; }
+  .wiz label.fld { display: block; font-size: 12.5px; color: var(--muted); margin: 2px 0 6px; }
+  .wiz input[type=text] { width: 100%; font-size: 15px; padding: 9px 11px; box-sizing: border-box; }
+  .wiz .wiz-url { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted);
+                  margin: 10px 0 0; word-break: break-all; min-height: 16px; }
+  .wiz .wiz-url b { color: var(--text); font-weight: 600; }
+  .wiz-note { font-size: 12.5px; color: var(--muted); line-height: 1.55; margin: 12px 0 0; }
+  .wiz-note.warn { color: #e3b341; }
+  .wiz-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px;
+                 border-top: 1px solid var(--border); padding-top: 14px; }
+  .wiz-actions .primary { background: var(--accent); border-color: var(--accent); color: #1b1206; font-weight: 600; }
+  .wiz-actions .primary:disabled { opacity: .5; cursor: not-allowed; }
+  .wiz-gh { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin: 4px 0 0; }
+  .wiz-gh .dot { width: 8px; height: 8px; border-radius: 99px; background: var(--muted); flex: none; }
+  .wiz-gh .dot.ok { background: var(--live); }
+  .wiz-gh .dot.no { background: #f85149; }
+  .wiz-live { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; padding: 12px 14px;
+              border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+  .wiz-live a { color: #58a6ff; font-family: ui-monospace, monospace; font-size: 12.5px; word-break: break-all; }
+  .wiz-busy { color: var(--muted); font-size: 12.5px; margin-top: 12px; }
+  .imp-repo { display: block; padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); }
+  .imp-repo:last-child { border-bottom: 0; }
+  .imp-repo:hover { background: var(--panel); }
+  .imp-repo.sel { background: rgba(88,166,255,.14); }
+  .imp-repo .rn { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 7px; }
+  .imp-repo .rv { font-size: 10px; color: var(--muted); background: var(--chip); padding: 1px 6px; border-radius: 99px; font-weight: 400; }
+  .imp-repo .rd { color: var(--muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .imp-empty { padding: 14px; color: var(--muted); font-size: 12.5px; text-align: center; }
+  /* Publish status — "is what I made live?" ------------------------------- */
+  .pubbar { display: flex; align-items: center; gap: 8px; padding: 9px 18px;
+            border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12.5px; }
+  .pubbar .pb-dot { width: 9px; height: 9px; border-radius: 99px; flex: none; background: currentColor; }
+  .pubbar .pb-txt { font-weight: 600; }
+  .pubbar .pb-det { color: var(--muted); }
+  .pubbar .pb-sp { flex: 1; }
+  .pubbar .pb-act { font-size: 12px; padding: 6px 12px; border-radius: 7px; }
+  .pubbar button.pb-go { background: var(--accent); border-color: var(--accent); color: #1b1206; font-weight: 600; }
+  .pubbar button.pb-go:disabled { opacity: .5; cursor: not-allowed; }
+  .pubbar a.pb-view { color: #58a6ff; text-decoration: none; border: 1px solid var(--border);
+                      background: var(--panel2); display: inline-flex; align-items: center; }
+  .pubpill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600;
+             padding: 2px 9px; border-radius: 99px; white-space: nowrap; margin-left: 8px; }
+  .pubpill .pb-dot { width: 7px; height: 7px; border-radius: 99px; background: currentColor; }
+  /* state colours — same palette as the wrap-up .vbadge set */
+  .st-live { color: var(--live); }        .pubpill.st-live { background: rgba(63,185,80,.16); }
+  .st-draft { color: #e3b341; }           .pubpill.st-draft { background: rgba(227,179,65,.18); }
+  .st-publishing { color: #58a6ff; }      .pubpill.st-publishing { background: rgba(88,166,255,.18); }
+  .st-failed { color: #f85149; }          .pubpill.st-failed { background: rgba(248,81,73,.16); }
+  .st-offline { color: var(--muted); }    .pubpill.st-offline { background: var(--chip); }
+  .st-publishing .pb-dot { animation: pbpulse 1.1s ease-in-out infinite; }
+  @keyframes pbpulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
   .chat {
     width: min(560px, 100%); background: var(--bg); border-left: 1px solid var(--border);
     display: flex; flex-direction: column; height: 100%;
@@ -502,6 +563,7 @@
       </label>
       <button class="chat-close" id="chatClose" title="Close">×</button>
     </div>
+    <div id="chatPublish" class="pubbar" hidden></div>
     <div id="chatBody" class="chat-body"></div>
     <div class="chat-compose" id="chatCompose"></div>
   </div>
@@ -573,6 +635,131 @@
         <div class="np-actions">
           <button id="npCancel" class="ghost">Cancel</button>
           <button id="npStart" class="primary" disabled>Start session</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="projChoiceOverlay" class="overlay center">
+  <div class="hk np">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">+ New project</div>
+        <div class="csub">How would you like to start?</div>
+      </div>
+      <button class="chat-close" id="pcClose" title="Close">×</button>
+    </div>
+    <div class="hk-body">
+      <div class="pc-cards">
+        <button class="pc-card" id="pcWebsite">
+          <span class="pc-ico">🌐</span>
+          <span>
+            <span class="pc-t">Build a website</span>
+            <span class="pc-d">Guided setup — name it and get a live website on the internet, backed by your GitHub. No terminal, no git knowledge needed. Publishing later is one click.</span>
+          </span>
+        </button>
+        <button class="pc-card" id="pcImport">
+          <span class="pc-ico">🔗</span>
+          <span>
+            <span class="pc-t">Edit a site I already have on GitHub</span>
+            <span class="pc-d">Pick one of your GitHub repositories — ClaudeNav downloads it, finds its live address, and you can edit and publish it straight away.</span>
+          </span>
+        </button>
+        <button class="pc-card" id="pcFolder">
+          <span class="pc-ico">📁</span>
+          <span>
+            <span class="pc-t">Pick or create a folder</span>
+            <span class="pc-d">The usual flow — browse to any folder (or make one), optionally <code>git init</code>, and start a Claude session there.</span>
+          </span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="wizOverlay" class="overlay center">
+  <div class="hk wiz">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">🌐 Build a website</div>
+        <div class="csub" id="wizSub">Give your site a name to get started.</div>
+      </div>
+      <button class="chat-close" id="wizClose" title="Close">×</button>
+    </div>
+    <div class="hk-body">
+      <!-- Step: name + GitHub check -->
+      <div id="wizForm" class="wiz-step">
+        <div class="wiz-gh" id="wizGh"><span class="dot"></span><span>Checking GitHub…</span></div>
+        <div style="margin-top:14px">
+          <label class="fld" for="wizName">What's your website called?</label>
+          <input id="wizName" type="text" placeholder="My cool site" autocomplete="off" />
+          <p class="wiz-url" id="wizUrl"></p>
+        </div>
+        <p class="wiz-note">We'll create a folder in your home directory, a GitHub repository, and a live page via GitHub Pages — all in one step.</p>
+        <div class="wiz-actions">
+          <button class="ghost" id="wizBack">Back</button>
+          <button class="primary" id="wizCreate" disabled>Create my website</button>
+        </div>
+      </div>
+      <!-- Step: working -->
+      <div id="wizWorking" class="wiz-step" hidden>
+        <p class="wiz-busy" id="wizWorkingMsg">Setting things up… this takes a few seconds.</p>
+      </div>
+      <!-- Step: done -->
+      <div id="wizDone" class="wiz-step" hidden>
+        <p class="wiz-note">🎉 Your website is created and published to GitHub.</p>
+        <div class="wiz-live">
+          <span>Live at</span>
+          <a id="wizLiveLink" href="#" target="_blank" rel="noopener"></a>
+        </div>
+        <p class="wiz-note">GitHub Pages can take a minute or two to build the first time — if it's not up yet, refresh shortly. From now on, editing and hitting <b>Publish</b> updates this site.</p>
+        <div class="wiz-actions">
+          <button class="ghost" id="wizDoneClose">Close</button>
+          <button class="primary" id="wizStartChat">Start building with Claude →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="impOverlay" class="overlay center">
+  <div class="hk wiz">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">🔗 Edit an existing site</div>
+        <div class="csub" id="impSub">Pick a repository from your GitHub.</div>
+      </div>
+      <button class="chat-close" id="impClose" title="Close">×</button>
+    </div>
+    <div class="hk-body">
+      <!-- Step: pick a repo -->
+      <div id="impPick" class="wiz-step">
+        <div class="wiz-gh" id="impGh"><span class="dot"></span><span>Checking GitHub…</span></div>
+        <input id="impSearch" type="text" placeholder="Search your repositories…" autocomplete="off" style="margin-top:14px" hidden />
+        <div id="impList" class="np-list" style="margin-top:10px; max-height:44vh" hidden></div>
+        <div class="wiz-actions">
+          <button class="ghost" id="impBack">Back</button>
+          <button class="primary" id="impOpen" disabled>Download &amp; open</button>
+        </div>
+      </div>
+      <!-- Step: working -->
+      <div id="impWorking" class="wiz-step" hidden>
+        <p class="wiz-busy" id="impWorkingMsg">Downloading your website…</p>
+      </div>
+      <!-- Step: done -->
+      <div id="impDone" class="wiz-step" hidden>
+        <p class="wiz-note">✅ Downloaded — ready to edit.</p>
+        <div class="wiz-live" id="impLiveWrap">
+          <span>Live at</span>
+          <a id="impLiveLink" href="#" target="_blank" rel="noopener"></a>
+        </div>
+        <p class="wiz-note" id="impNoPages" hidden>This repository isn't publishing a live site yet.
+          <a href="#" id="impEnablePages">Turn on GitHub Pages</a> to put it online.</p>
+        <p class="wiz-note">Editing and hitting <b>Publish</b> (commit + push) updates the live site.</p>
+        <div class="wiz-actions">
+          <button class="ghost" id="impDoneClose">Close</button>
+          <button class="primary" id="impStartChat">Start building with Claude →</button>
         </div>
       </div>
     </div>
@@ -867,6 +1054,7 @@ function render() {
       <div class="project-head">
         <button class="chev" data-collapse="${esc(p.cwd)}" title="${isCollapsed ? 'Expand' : 'Collapse'}">${isCollapsed ? '▸' : '▾'}</button>
         <span class="project-name">${esc(p.name)}</span>
+        <span class="pubpill" data-pubpill data-cwd="${esc(p.cwd)}" hidden></span>
         ${liveBadge}
         <span class="badge">${p.sessions.length} session${p.sessions.length > 1 ? 's' : ''}</span>
         <span class="project-path">${esc(p.cwd)}</span>
@@ -945,6 +1133,20 @@ function render() {
     `${DATA.projects.length} projects · updated ${new Date(DATA.generatedAt).toLocaleTimeString()}`;
   renderFolders();
   renderLightSummary();
+  refreshRowPubStatus();
+}
+
+// Paint the row pills from cache, and (re)fetch publish status for expanded
+// projects — scoped to what's visible so we don't spawn `gh` for every repo.
+// Collapsed sections are skipped; the open chat's cwd is handled by the poll.
+function refreshRowPubStatus() {
+  const seen = new Set();
+  for (const p of DATA.projects) {
+    if (!p.cwd || seen.has(p.cwd)) continue;
+    seen.add(p.cwd);
+    paintPubUI(p.cwd);
+    if (!collapsed.has(p.cwd)) fetchSiteStatus(p.cwd);
+  }
 }
 
 function renderLightSummary() {
@@ -1136,6 +1338,8 @@ function openChat(id) {
   setupModelSelect(modelOf(s));
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
+  renderPubBar(chat.cwd);            // show cached status instantly, if any
+  fetchSiteStatus(chat.cwd, true);   // then refresh
   renderCompose(p, s); // after .show so box.focus() lands on a visible element
   loadTranscript(true);
   checkChatStatus();
@@ -1166,6 +1370,8 @@ function openNewChat(cwd, name) {
   setupModelSelect('default');
   document.getElementById('overlay').classList.add('show');
   document.body.classList.add('overlay-open');
+  renderPubBar(chat.cwd);
+  fetchSiteStatus(chat.cwd, true);
   renderCompose({ liveTerminals: 0 }, null); // after .show so box.focus() lands on a visible element
   checkChatStatus();
   clearInterval(chat.poll);
@@ -1177,6 +1383,7 @@ function closeChat() {
   document.body.classList.remove('overlay-open');
   clearInterval(chat.poll);
   chat.sessionId = null;
+  document.getElementById('chatPublish').hidden = true;
   resetTabSignal();
 }
 
@@ -1596,6 +1803,9 @@ async function checkChatStatus() {
 function pollTick() {
   loadTranscript(false);
   checkChatStatus();
+  // Refresh publish status while the chat is open (throttled inside fetch);
+  // catches the "Publishing… → Live" flip without user action.
+  if (chat.cwd) fetchSiteStatus(chat.cwd);
 }
 
 // Pin the transcript to the newest message. Runs now, on the next frame (after
@@ -2397,7 +2607,348 @@ async function npStart() {
   } catch (e) { toast('Could not start: ' + e.message, true); }
 }
 
-document.getElementById('newProject').addEventListener('click', openNewProject);
+// The "+ New project" button now opens a small chooser: the guided website
+// wizard, or the original folder picker (unchanged, one click deeper).
+function openProjChoice() {
+  document.getElementById('projChoiceOverlay').classList.add('show');
+  document.body.classList.add('overlay-open');
+}
+function closeProjChoice() {
+  document.getElementById('projChoiceOverlay').classList.remove('show');
+  document.body.classList.remove('overlay-open');
+}
+document.getElementById('newProject').addEventListener('click', openProjChoice);
+document.getElementById('pcClose').addEventListener('click', closeProjChoice);
+document.getElementById('pcFolder').addEventListener('click', () => { closeProjChoice(); openNewProject(); });
+document.getElementById('pcWebsite').addEventListener('click', () => { closeProjChoice(); openSiteWizard(); });
+
+// ---- Website wizard -------------------------------------------------------
+// Guided, git-free path for non-devs: name a site → server provisions a folder,
+// a starter page, a GitHub repo (pushed) and GitHub Pages, then hands off to the
+// in-browser chat. Publishing later is just commit + push (Pages redeploys).
+let wizState = { authed: false, done: null };
+
+function wizShow(step) {
+  for (const id of ['wizForm', 'wizWorking', 'wizDone'])
+    document.getElementById(id).hidden = (id !== step);
+}
+
+async function openSiteWizard() {
+  document.getElementById('wizOverlay').classList.add('show');
+  document.body.classList.add('overlay-open');
+  wizShow('wizForm');
+  document.getElementById('wizName').value = '';
+  document.getElementById('wizUrl').textContent = '';
+  document.getElementById('wizCreate').disabled = true;
+  document.getElementById('wizSub').textContent = 'Give your site a name to get started.';
+  await wizCheckGh();
+  document.getElementById('wizName').focus();
+}
+function closeSiteWizard() {
+  document.getElementById('wizOverlay').classList.remove('show');
+  document.body.classList.remove('overlay-open');
+}
+
+// Shared GitHub-connection status line for both website wizards. Renders into
+// `el` and calls onReady(status) each time it settles (after a check or retry).
+// Queries are scoped to `el` so the two wizards never fight over element ids.
+async function renderGhStatus(el, onReady) {
+  el.innerHTML = '<span class="dot"></span><span>Checking GitHub…</span>';
+  let s;
+  try { s = await (await fetch('/api/gh-status')).json(); } catch { s = {}; }
+  if (!s.installed) {
+    el.innerHTML = '<span class="dot no"></span><span>GitHub CLI not found — install it from '
+      + '<a href="#" class="gh-cli">cli.github.com</a>, then reopen this.</span>';
+    el.querySelector('.gh-cli').onclick = (e) => { e.preventDefault(); openExternal('https://cli.github.com'); };
+  } else if (!s.authed) {
+    el.innerHTML = '<span class="dot no"></span><span>Not signed in — '
+      + '<a href="#" class="gh-login">Connect GitHub</a> (opens a terminal), then <a href="#" class="gh-retry">re-check</a>.</span>';
+    el.querySelector('.gh-login').onclick = async (e) => {
+      e.preventDefault();
+      try { await api('/api/open', { ghLogin: true }); toast('Follow the GitHub sign-in in the terminal, then re-check.'); }
+      catch (err) { toast('Could not open terminal: ' + err.message, true); }
+    };
+    el.querySelector('.gh-retry').onclick = (e) => { e.preventDefault(); renderGhStatus(el, onReady); };
+  } else {
+    el.innerHTML = '<span class="dot ok"></span><span>Signed in as <b>' + esc(s.user) + '</b></span>';
+  }
+  onReady(s);
+  return s;
+}
+
+function wizCheckGh() {
+  return renderGhStatus(document.getElementById('wizGh'), (s) => {
+    wizState.authed = !!s.authed;
+    wizSyncCreate();
+  });
+}
+
+function wizSlug(name) {
+  return (name || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+function wizSyncCreate() {
+  const name = document.getElementById('wizName').value;
+  const slug = wizSlug(name);
+  document.getElementById('wizCreate').disabled = !(wizState.authed && slug);
+  const urlEl = document.getElementById('wizUrl');
+  urlEl.innerHTML = slug ? ('Folder <b>~/' + esc(slug) + '</b> · will be live at a github.io address') : '';
+}
+
+async function wizCreate() {
+  const name = document.getElementById('wizName').value.trim();
+  if (!name) return;
+  wizShow('wizWorking');
+  document.getElementById('wizSub').textContent = 'Creating your website…';
+  try {
+    const r = await api('/api/site-create', { name });
+    wizState.done = r;
+    document.getElementById('wizSub').textContent = 'All set.';
+    const a = document.getElementById('wizLiveLink');
+    a.textContent = r.pagesUrl;
+    a.href = r.pagesUrl;
+    a.onclick = (e) => { e.preventDefault(); openExternal(r.pagesUrl); };
+    wizShow('wizDone');
+    load(); // surface the new project
+  } catch (e) {
+    wizShow('wizForm');
+    document.getElementById('wizSub').textContent = 'Give your site a name to get started.';
+    toast('Could not create the website: ' + e.message, true);
+  }
+}
+
+document.getElementById('wizClose').addEventListener('click', closeSiteWizard);
+document.getElementById('wizDoneClose').addEventListener('click', closeSiteWizard);
+document.getElementById('wizBack').addEventListener('click', () => { closeSiteWizard(); openProjChoice(); });
+document.getElementById('wizName').addEventListener('input', wizSyncCreate);
+document.getElementById('wizName').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !document.getElementById('wizCreate').disabled) wizCreate();
+});
+document.getElementById('wizCreate').addEventListener('click', wizCreate);
+document.getElementById('wizStartChat').addEventListener('click', () => {
+  const d = wizState.done; if (!d) return;
+  closeSiteWizard();
+  openNewChat(d.cwd, d.slug);
+});
+
+// ---- Import wizard (edit an existing GitHub site) -------------------------
+// Pick one of the user's repos → clone into $HOME → detect its live Pages URL →
+// hand off to chat. Publishing later is the same commit + push as any repo.
+let impState = { authed: false, repos: [], selected: null, done: null };
+
+function impShow(step) {
+  for (const id of ['impPick', 'impWorking', 'impDone'])
+    document.getElementById(id).hidden = (id !== step);
+}
+function openImportWizard() {
+  document.getElementById('impOverlay').classList.add('show');
+  document.body.classList.add('overlay-open');
+  impState = { authed: false, repos: [], selected: null, done: null };
+  impShow('impPick');
+  document.getElementById('impSub').textContent = 'Pick a repository from your GitHub.';
+  document.getElementById('impSearch').hidden = true;
+  document.getElementById('impSearch').value = '';
+  document.getElementById('impList').hidden = true;
+  document.getElementById('impOpen').disabled = true;
+  renderGhStatus(document.getElementById('impGh'), (s) => {
+    impState.authed = !!s.authed;
+    if (s.authed) impLoadRepos();
+  });
+}
+function closeImportWizard() {
+  document.getElementById('impOverlay').classList.remove('show');
+  document.body.classList.remove('overlay-open');
+}
+
+async function impLoadRepos() {
+  const list = document.getElementById('impList');
+  list.hidden = false;
+  list.innerHTML = '<div class="imp-empty">Loading your repositories…</div>';
+  try {
+    const j = await (await fetch('/api/gh-repos')).json();
+    if (j.error) throw new Error(j.error);
+    impState.repos = j.repos || [];
+    document.getElementById('impSearch').hidden = false;
+    impRenderRepos('');
+  } catch (e) {
+    list.innerHTML = '<div class="imp-empty">Could not list repositories: ' + esc(e.message) + '</div>';
+  }
+}
+
+function impRenderRepos(filter) {
+  const list = document.getElementById('impList');
+  const q = (filter || '').toLowerCase();
+  const rows = impState.repos.filter(r =>
+    !q || r.name.toLowerCase().includes(q) || (r.description || '').toLowerCase().includes(q));
+  if (!rows.length) { list.innerHTML = '<div class="imp-empty">No matching repositories.</div>'; return; }
+  list.innerHTML = rows.map(r =>
+    `<div class="imp-repo" data-nwo="${esc(r.nameWithOwner)}">
+       <div class="rn">${esc(r.name)}<span class="rv">${esc(r.visibility || '').toLowerCase()}</span></div>
+       ${r.description ? `<div class="rd">${esc(r.description)}</div>` : ''}
+     </div>`).join('');
+}
+
+document.getElementById('impList').addEventListener('click', (e) => {
+  const row = e.target.closest('.imp-repo'); if (!row) return;
+  for (const el of document.querySelectorAll('.imp-repo.sel')) el.classList.remove('sel');
+  row.classList.add('sel');
+  impState.selected = row.dataset.nwo;
+  document.getElementById('impOpen').disabled = false;
+});
+document.getElementById('impSearch').addEventListener('input', (e) => impRenderRepos(e.target.value));
+
+async function impOpen() {
+  const repo = impState.selected; if (!repo) return;
+  impShow('impWorking');
+  document.getElementById('impSub').textContent = 'Downloading your website…';
+  try {
+    const r = await api('/api/site-import', { repo });
+    impState.done = r;
+    document.getElementById('impSub').textContent = 'Ready.';
+    // Live-URL vs no-pages messaging.
+    const hasPages = !!r.pagesEnabled;
+    document.getElementById('impLiveWrap').hidden = !hasPages;
+    document.getElementById('impNoPages').hidden = hasPages;
+    if (hasPages) {
+      const a = document.getElementById('impLiveLink');
+      a.textContent = r.pagesUrl; a.href = r.pagesUrl;
+      a.onclick = (e) => { e.preventDefault(); openExternal(r.pagesUrl); };
+    }
+    impShow('impDone');
+    load();
+  } catch (e) {
+    impShow('impPick');
+    document.getElementById('impSub').textContent = 'Pick a repository from your GitHub.';
+    toast('Could not open that site: ' + e.message, true);
+  }
+}
+
+async function impDoEnablePages() {
+  const d = impState.done; if (!d) return;
+  const repo = d.owner + '/' + d.slug;
+  try {
+    toast('Turning on GitHub Pages…');
+    const r = await api('/api/site-enable-pages', { repo });
+    d.pagesEnabled = true; d.pagesUrl = r.pagesUrl || d.pagesUrl;
+    document.getElementById('impNoPages').hidden = true;
+    document.getElementById('impLiveWrap').hidden = false;
+    const a = document.getElementById('impLiveLink');
+    a.textContent = d.pagesUrl; a.href = d.pagesUrl;
+    a.onclick = (e) => { e.preventDefault(); openExternal(d.pagesUrl); };
+    toast('GitHub Pages enabled — it may take a minute to build.');
+  } catch (e) { toast('Could not enable Pages: ' + e.message, true); }
+}
+
+document.getElementById('impClose').addEventListener('click', closeImportWizard);
+document.getElementById('impDoneClose').addEventListener('click', closeImportWizard);
+document.getElementById('impBack').addEventListener('click', () => { closeImportWizard(); openProjChoice(); });
+document.getElementById('impOpen').addEventListener('click', impOpen);
+document.getElementById('impEnablePages').addEventListener('click', (e) => { e.preventDefault(); impDoEnablePages(); });
+document.getElementById('impStartChat').addEventListener('click', () => {
+  const d = impState.done; if (!d) return;
+  closeImportWizard();
+  openNewChat(d.cwd, d.slug);
+});
+document.getElementById('pcImport').addEventListener('click', () => { closeProjChoice(); openImportWizard(); });
+
+// ---- Publish status -------------------------------------------------------
+// One honest answer to "is what I made live?" — a full control in the chat
+// header (status + Publish/View/Enable) and a compact pill on each website's
+// project row. Both read from one client cache; /api/site-status is cheap
+// (git is local; the Pages half is server-cached ~30s), so we can poll it.
+const PUB_STATES = {
+  draft:      { short: 'Draft',          act: { kind: 'publish', label: 'Publish ▸', go: true } },
+  publishing: { short: 'Publishing…',    act: null },
+  live:       { short: 'Live',           act: { kind: 'view', label: 'View site ↗' } },
+  failed:     { short: 'Publish failed', act: { kind: 'publish', label: 'Retry', go: true } },
+  offline:    { short: 'Not online',     act: { kind: 'enable', label: 'Put it online', go: true } },
+};
+const siteStat = {}; // cwd -> { data, at, inflight }
+
+async function fetchSiteStatus(cwd, force) {
+  if (!cwd) return;
+  const e = siteStat[cwd] || (siteStat[cwd] = {});
+  if (e.inflight) return;
+  if (!force && e.at && Date.now() - e.at < 5000) return;
+  e.inflight = true;
+  try {
+    const r = await fetch('/api/site-status?cwd=' + encodeURIComponent(cwd));
+    e.data = await r.json(); e.at = Date.now();
+    paintPubUI(cwd);
+  } catch { /* transient — next tick retries */ }
+  finally { e.inflight = false; }
+}
+
+// Repaint every visible surface for this cwd: the chat bar (if open here) and
+// any project-row pills.
+function paintPubUI(cwd) {
+  const st = (siteStat[cwd] || {}).data;
+  if (chat && chat.cwd === cwd) renderPubBar(cwd);
+  document.querySelectorAll(`.pubpill[data-cwd="${CSS.escape(cwd)}"]`).forEach(el => {
+    const cfg = st && PUB_STATES[st.state];
+    if (!cfg) { el.hidden = true; return; }
+    el.hidden = false;
+    el.className = 'pubpill st-' + st.state;
+    el.title = st.label + (st.detail ? ' · ' + st.detail : '');
+    el.innerHTML = '<span class="pb-dot"></span>' + esc(cfg.short);
+  });
+}
+
+function renderPubBar(cwd) {
+  const bar = document.getElementById('chatPublish');
+  const st = (siteStat[cwd] || {}).data;
+  const cfg = st && PUB_STATES[st.state];
+  if (!cfg) { bar.hidden = true; bar.innerHTML = ''; return; }
+  bar.hidden = false;
+  bar.className = 'pubbar st-' + st.state;
+  bar.dataset.cwd = cwd;
+  let right = '';
+  // Always let them peek at the current live site (except when it isn't online).
+  if (st.pagesEnabled && st.pagesUrl && st.state !== 'live')
+    right += `<a class="pb-act pb-view" data-act="view" href="#">View live ↗</a>`;
+  if (cfg.act)
+    right += `<button class="pb-act${cfg.act.go ? ' pb-go' : ''}" data-act="${cfg.act.kind}">${esc(cfg.act.label)}</button>`;
+  bar.innerHTML = '<span class="pb-dot"></span>'
+    + `<span class="pb-txt">${esc(st.label)}</span>`
+    + (st.detail ? `<span class="pb-det">· ${esc(st.detail)}</span>` : '')
+    + '<span class="pb-sp"></span>' + right;
+}
+
+document.getElementById('chatPublish').addEventListener('click', (e) => {
+  const el = e.target.closest('.pb-act'); if (!el) return;
+  e.preventDefault();
+  const cwd = document.getElementById('chatPublish').dataset.cwd;
+  const st = (siteStat[cwd] || {}).data; if (!st) return;
+  if (el.dataset.act === 'view') return openExternal(st.pagesUrl);
+  if (el.dataset.act === 'publish') return doPublish(cwd);
+  if (el.dataset.act === 'enable') return doEnablePages(cwd, st.nwo);
+});
+
+async function doPublish(cwd) {
+  const bar = document.getElementById('chatPublish');
+  const btn = bar.querySelector('.pb-go');
+  if (btn) { btn.disabled = true; btn.textContent = 'Publishing…'; }
+  try {
+    const r = await api('/api/publish', { cwd });
+    const e = siteStat[cwd] || (siteStat[cwd] = {});
+    e.data = r; e.at = Date.now();
+    paintPubUI(cwd);
+    toast('Published — your site will update in about a minute.');
+  } catch (err) {
+    toast('Could not publish: ' + err.message, true);
+    fetchSiteStatus(cwd, true);
+  }
+}
+
+async function doEnablePages(cwd, nwo) {
+  if (!nwo) return;
+  try {
+    toast('Putting your site online…');
+    await api('/api/site-enable-pages', { repo: nwo });
+    toast('Online! GitHub Pages may take a minute to build.');
+    fetchSiteStatus(cwd, true);
+  } catch (err) { toast('Could not put it online: ' + err.message, true); }
+}
+
 document.getElementById('npClose').addEventListener('click', closeNewProject);
 document.getElementById('npCancel').addEventListener('click', closeNewProject);
 document.getElementById('npStart').addEventListener('click', npStart);
