@@ -952,7 +952,8 @@ function pauseForQuestion(sessionId) {
 
 // Auth failures don't crash the CLI cleanly — they surface as API 401 text in
 // the stream (and sometimes exit 0 with the failure written to the transcript).
-// Match those so the UI can say "re-login" instead of a bare exit code.
+// Match those so the UI can say "re-login" instead of a bare exit code. Gated by
+// isErrorSignalLine so a turn that merely *quotes* "/login" doesn't false-flag.
 const AUTH_ERR_RE = /API Error: 401|invalid authentication|invalid api key|authentication_error|OAuth token (?:has )?(?:expired|been revoked)|please run \/login/i;
 const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal, run `claude`, then `/login` to re-authenticate, and retry';
 
@@ -962,14 +963,15 @@ const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal
 // the UI can say "you're out of tokens, resets <when>" instead of "exited 1".
 const USAGE_ERR_RE = /usage limit reached|rate.?limit|rate_limit_error|API Error: 429|too many requests|quota (?:exceeded|reached)|\b\d+-hour limit reached|weekly limit reached/i;
 
-// Which stdout lines may legitimately carry a usage-limit signal. Crucially NOT
-// `assistant` prose, NOT `user` (tool_result) lines — both are free-form content
-// that routinely says "rate limit"/"usage limit" — and NOT a *successful*
-// `result` line, whose `result` field just echoes the assistant's final text.
-// Only an error `result`, a `system` line, or an unparseable (stderr-like) line
-// is a real signal. Without this, a turn that merely talks about usage limits
-// (like this very feature's sessions) false-positives.
-function isUsageSignalLine(line) {
+// Which stdout lines may legitimately carry a failure signal (auth OR usage).
+// Crucially NOT `assistant` prose, NOT `user` (tool_result) lines — both are
+// free-form content that routinely quotes phrases like "please run /login" or
+// "usage limit" — and NOT a *successful* `result` line, whose `result` field
+// just echoes the assistant's final text. Only an error `result`, a `system`
+// line, or an unparseable (stderr-like) line is a real signal. Without this, a
+// turn that merely *talks about* auth or usage limits (like this very feature's
+// sessions) false-positives into a phantom "Re-login"/"out of tokens" toast.
+function isErrorSignalLine(line) {
   let o; try { o = JSON.parse(line); } catch { return true; }  // non-JSON → scan
   if (o.type === 'assistant' || o.type === 'user') return false;
   if (o.type === 'result') return !!o.is_error;
@@ -1053,11 +1055,12 @@ function drainQueue(sessionId) {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
       if (line.trim()) {
-        if (!sawAuthError && AUTH_ERR_RE.test(line)) sawAuthError = true;
-        // Only flag a usage limit off lines that genuinely carry an error signal
-        // (see isUsageSignalLine): the phrases "rate limit"/"usage limit" show up
-        // constantly in assistant prose, tool output, and echoed result text.
-        if (!sawUsageError && isUsageSignalLine(line) && USAGE_ERR_RE.test(line)) {
+        // Both auth and usage phrases show up constantly in assistant prose,
+        // tool output, and echoed result text — so only trust lines that
+        // genuinely carry an error signal (see isErrorSignalLine).
+        const signal = isErrorSignalLine(line);
+        if (signal && !sawAuthError && AUTH_ERR_RE.test(line)) sawAuthError = true;
+        if (signal && !sawUsageError && USAGE_ERR_RE.test(line)) {
           sawUsageError = true; usageErrLine = line;
         }
         ingestStreamLine(sessionId, line);
