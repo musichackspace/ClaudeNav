@@ -129,6 +129,60 @@ removes both agents.
   start as a plain session in the chosen folder (no worktree — there's no HEAD
   to branch from yet); the per-project "+ New session" worktree flow stays for
   established repos.
+- `GET /api/gh-status` — `{installed, authed, user}` for the **website wizard**
+  (the guided "+ New project" path for non-devs). Uses the `gh` CLI as the
+  engine — `resolveGhBin()` mirrors `resolveClaudeBin()` (`GH_BIN`, then
+  `command -v gh`, then known dirs). `installed` is false if `gh` is missing;
+  `authed`/`user` come from `gh api user`.
+- `POST /api/site-create {name, parent?}` — provision a website end-to-end:
+  make a `$HOME`-bounded folder (slug of `name`, defaults under `$HOME`), write
+  a starter `index.html`/`README.md`, `git init` + first commit, `gh repo create
+  <slug> --source <cwd> --public --push`, then enable **GitHub Pages** (main /
+  root) via `gh api`. Returns `{cwd, slug, owner, repoUrl, pagesUrl}`. Pages
+  enabling is best-effort (propagation lag / already-enabled are non-fatal; the
+  `github.io` URL is deterministic). "Publish" for these sites is just the
+  existing commit + push — Pages redeploys on every push to main. Signing in is
+  interactive: `POST /api/open {ghLogin:true}` opens a terminal running
+  `gh auth login` (same pattern as the Claude `/login` re-auth).
+- `GET /api/gh-repos` — `{owner, repos:[{name, nameWithOwner, description,
+  visibility, url, pushedAt, isFork}]}` (own, non-archived sources, newest
+  activity first) — the picker for the wizard's **"edit a site I already have"**
+  path. `gh repo list`.
+- `POST /api/site-import {repo, parent?}` — `gh repo clone` an existing repo
+  (`owner/name`) into a `$HOME`-bounded `<name>` folder, so it can be maintained
+  + published from ClaudeNav. If that folder already IS this repo (same origin),
+  reuses it (`reused:true`) instead of erroring; a *different* folder of the same
+  name is refused. Returns `{cwd, slug, owner, repoUrl, pagesUrl, pagesEnabled}`
+  — `pagesInfo()` reads `GET repos/{nwo}/pages` (404 → `pagesEnabled:false`; the
+  live `html_url` is authoritative when on, handling custom domains / user-root
+  sites; else a deterministic `github.io` fallback).
+- `POST /api/site-enable-pages {repo}` — turn on Pages (default branch / root)
+  for an imported site that isn't publishing yet; idempotent (already-enabled
+  returns its URL). Returns `{pagesEnabled, pagesUrl}`.
+- `GET /api/site-status?cwd=<dir>` — **"is what I made live?"** for a website.
+  `siteStatus()` derives one plain-language `state` (+ `label`, `detail`) from
+  git + Pages: `draft` (uncommitted or unpushed changes), `publishing` (pushed,
+  Pages still building or built an older commit), `live` (pushed commit is built
+  and serving), `failed` (build errored), `offline` (has a GitHub remote but
+  Pages off), `local` (no remote), `repo` (GitHub remote but *not* a website —
+  see `isSite`), `nonrepo`/`unknown`. `isSite` = Pages already enabled **or** the
+  folder is in the wizard's sites registry (`~/.claude/claudenav-sites.json`,
+  written by `site-create`/`site-import`); a non-site repo returns `repo` and the
+  UI shows no pill, so ordinary code projects (ClaudeNav itself) don't get a
+  misleading "Not online". The honest rule for
+  `live`: working tree clean **and** the pushed commit (`@{u}`) equals the commit
+  GitHub Pages last built (`GET repos/{nwo}/pages/builds/latest`) **and** that
+  build succeeded. The networked (Pages) half is cached per-repo ~30s
+  (`pagesCache`, invalidated on publish) so the UI can poll cheaply; the git half
+  is recomputed each call. Also returns `dirty, changeCount, ahead, nwo,
+  pagesEnabled, pagesUrl, buildStatus`. Drives the chat-header **Publish bar**
+  and the compact per-row **pill** (both reuse the `.vbadge` colour palette).
+- `POST /api/publish {cwd, message?}` — the one-button ship-it: `git add -A` +
+  commit (only if dirty) + push (`-u origin <branch>` on the first push).
+  `$HOME`-bounded + must be a git repo with a GitHub remote. Invalidates the
+  Pages cache and returns the fresh `siteStatus()` so the pill flips to
+  `publishing` at once (then to `live` on the next poll once Pages rebuilds).
+  For Pages sites, push *is* deploy — no separate deploy step.
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
 - `POST /api/assess {session}` — AI "is it safe to wrap?" (adds a turn).
 - `POST /api/handover {session}` — for a context-heavy session: have it write a

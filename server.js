@@ -463,6 +463,13 @@ function buildLoginCommand() {
   return `cd ${shQuote(os.homedir())} && echo 'Re-authenticating Claude — if login does not start automatically, type /login' && claude /login`;
 }
 
+// Connecting a GitHub account (for the website wizard) is also interactive-only
+// — `gh auth login` runs its own browser/device flow — so we open a terminal
+// with it already running, same pattern as the Claude re-login above.
+function buildGhLoginCommand() {
+  return `cd ${shQuote(os.homedir())} && echo 'Connecting to GitHub — choose GitHub.com, then "Login with a web browser" and follow the prompts.' && gh auth login`;
+}
+
 function appleScriptFor(appName, shellCmd) {
   const q = osaQuote(shellCmd);
   if (appName === 'iTerm') {
@@ -497,9 +504,11 @@ function openUrl(rawUrl, cb) {
   execFile(cmd, args, (err) => err ? cb(new Error(err.message)) : cb(null, { opened: u.href }));
 }
 
-function openTerminal({ cwd, sessionId, app, login }, cb) {
-  if (!login && !cwd) return cb(new Error('missing cwd'));
-  const shellCmd = login ? buildLoginCommand() : buildShellCommand({ cwd, sessionId });
+function openTerminal({ cwd, sessionId, app, login, ghLogin }, cb) {
+  if (!login && !ghLogin && !cwd) return cb(new Error('missing cwd'));
+  const shellCmd = ghLogin ? buildGhLoginCommand()
+    : login ? buildLoginCommand()
+    : buildShellCommand({ cwd, sessionId });
   const script = appleScriptFor(app === 'iTerm' ? 'iTerm' : 'Terminal', shellCmd);
   execFile('osascript', ['-e', script], (err, stdout, stderr) => {
     if (err) return cb(new Error(stderr || err.message));
@@ -1647,6 +1656,362 @@ function gitInit(cwd, cb) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Website wizard — a guided "+ New project" path for non-devs: name a site,
+// and get a local folder, a starter page, a GitHub repo, and a live GitHub
+// Pages URL in one step. Runs alongside the plain folder picker (unchanged).
+//
+// The `gh` CLI is the engine: it already owns GitHub auth (keychain/config),
+// creates the repo, pushes, and enables Pages via its API — so there are no
+// tokens to wrangle and no new dependency. "Publish" for these sites is just
+// commit + push to main (the existing /api/commit + /api/push), because Pages
+// redeploys on every push. Signing in is interactive (`gh auth login` in a
+// terminal), like the Claude re-login flow.
+// ---------------------------------------------------------------------------
+
+function resolveGhBin() {
+  if (process.env.GH_BIN) return process.env.GH_BIN;
+  try {
+    const onPath = execFileSync('/bin/sh', ['-c', 'command -v gh'], { encoding: 'utf8' }).trim();
+    if (onPath) return onPath;
+  } catch { /* not on PATH; probe known dirs */ }
+  for (const c of ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh', path.join(HOME, '.local', 'bin', 'gh')]) {
+    try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
+  }
+  return null;
+}
+const GH_BIN = resolveGhBin();
+
+function gh(args, opts = {}) {
+  if (!GH_BIN) { const e = new Error('the GitHub CLI (gh) is not installed'); e.code = 'GH_MISSING'; throw e; }
+  return execFileSync(GH_BIN, args, {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 8 * 1024 * 1024, ...opts,
+  }).trim();
+}
+function ghErr(e) {
+  return (e.stderr || e.stdout || e.message || 'GitHub operation failed').toString().trim().slice(0, 400);
+}
+
+// {installed, authed, user} — cheap enough to call on every wizard open.
+function ghStatus() {
+  if (!GH_BIN) return { installed: false, authed: false, user: null };
+  try { return { installed: true, authed: true, user: gh(['api', 'user', '--jq', '.login']) }; }
+  catch { return { installed: true, authed: false, user: null }; }
+}
+
+// Repo/URL-safe slug from a human site name. Empty if nothing usable is left.
+function siteSlug(name) {
+  return (name || '').toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+// Folders provisioned/imported as websites through the wizard. This is what
+// tells the publish UI "treat this repo as a site" even before Pages is on, so
+// ordinary code repos (which also have a GitHub remote) never get a misleading
+// "Not online" pill. A repo with Pages already enabled counts as a site too
+// (see siteStatus), so this only needs to remember the wizard's own creations.
+const SITES_FILE = path.join(os.homedir(), '.claude', 'claudenav-sites.json');
+const knownSites = new Set();
+try {
+  const raw = JSON.parse(fs.readFileSync(SITES_FILE, 'utf8'));
+  if (Array.isArray(raw)) for (const p of raw) if (typeof p === 'string') knownSites.add(p);
+} catch { /* no file yet */ }
+function rememberSite(cwd) {
+  const abs = underHome(cwd);
+  if (!abs) return;
+  knownSites.add(abs);
+  try { fs.writeFileSync(SITES_FILE, JSON.stringify([...knownSites])); } catch {}
+}
+
+function starterIndexHtml(name) {
+  const t = String(name || 'My Website').replace(/[<&>]/g, c => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]));
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${t}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+           display: grid; place-items: center; min-height: 100vh;
+           background: #0f1115; color: #e6e6e6; text-align: center; padding: 2rem; }
+    .card { max-width: 40rem; }
+    h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin: 0 0 .5rem; }
+    p { opacity: .8; margin: .25rem 0; }
+    .hint { margin-top: 2rem; font-size: .9rem; opacity: .55; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${t}</h1>
+    <p>Your new website is live. 🎉</p>
+    <p>Open the chat in ClaudeNav and describe what you'd like it to look like.</p>
+    <p class="hint">Edit this file (index.html) or ask Claude — then hit Publish.</p>
+  </div>
+</body>
+</html>
+`;
+}
+function starterReadme(name) {
+  return `# ${name || 'My Website'}\n\nA website built with ClaudeNav. Edit \`index.html\` (or ask Claude), then Publish to update the live site.\n`;
+}
+
+// Create a website end-to-end: folder → starter files → git repo + first commit
+// → GitHub repo (pushed) → GitHub Pages enabled. Returns the local cwd and the
+// live URL. Best-effort on Pages (propagation lag / already-enabled are fine).
+function createSite({ name, parent }, cb) {
+  const status = ghStatus();
+  if (!status.installed) return cb(new Error('the GitHub CLI (gh) is not installed — install it from https://cli.github.com'));
+  if (!status.authed) return cb(new Error('not signed in to GitHub — connect your account first'));
+  const slug = siteSlug(name);
+  if (!slug) return cb(new Error('please enter a site name (letters and numbers)'));
+
+  const base = underHome(parent && String(parent).trim() ? parent : HOME);
+  if (!base) return cb(new Error('that location is outside your home directory'));
+  const cwd = path.join(base, slug);
+  try { if (fs.existsSync(cwd) && fs.readdirSync(cwd).length) return cb(new Error(`a folder named "${slug}" already exists here — pick another name`)); }
+  catch { /* unreadable — mkdir below will surface it */ }
+
+  const owner = status.user;
+  try {
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'index.html'), starterIndexHtml(name));
+    fs.writeFileSync(path.join(cwd, 'README.md'), starterReadme(name));
+
+    git(cwd, ['init']);
+    try { git(cwd, ['symbolic-ref', 'HEAD', 'refs/heads/main']); } catch { /* older git defaults are fine */ }
+    git(cwd, ['add', '-A']);
+    execFileSync('git', ['-C', cwd, 'commit', '-m', 'Initial website (ClaudeNav)'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    return cb(new Error('could not set up the folder: ' + (e.message || 'failed')));
+  }
+
+  try {
+    gh(['repo', 'create', slug, '--source', cwd, '--public', '--push', '--remote', 'origin'], { cwd });
+  } catch (e) {
+    return cb(new Error('created locally, but publishing to GitHub failed: ' + ghErr(e)));
+  }
+
+  // Enable Pages from main / root. Non-fatal: a fresh repo can 404 briefly, and
+  // re-runs hit "already enabled" — either way the URL is deterministic.
+  const pagesUrl = `https://${owner}.github.io/${slug}/`;
+  try { gh(['api', '-X', 'POST', `repos/${owner}/${slug}/pages`, '-f', 'source[branch]=main', '-f', 'source[path]=/']); }
+  catch { /* propagation lag or already enabled — leave a note via pagesEnabled */ }
+
+  rememberSite(cwd);
+  cb(null, { cwd, slug, owner, repoUrl: `https://github.com/${owner}/${slug}`, pagesUrl });
+}
+
+// Live-site status for an existing repo. `GET repos/{nwo}/pages` 404s when Pages
+// is off (→ enabled:false); when on, `.html_url` is authoritative (it handles
+// custom domains and user/org root sites, unlike the deterministic guess).
+function pagesInfo(nwo) {
+  try {
+    const j = JSON.parse(gh(['api', `repos/${nwo}/pages`, '--jq', '{url: .html_url}']));
+    return { enabled: true, url: j.url || null };
+  } catch { return { enabled: false, url: null }; }
+}
+
+// List the signed-in user's own repos, newest activity first — the picker for
+// "edit a site I already have on GitHub".
+function ghListRepos(cb) {
+  const status = ghStatus();
+  if (!status.installed) return cb(new Error('the GitHub CLI (gh) is not installed'));
+  if (!status.authed) return cb(new Error('not signed in to GitHub'));
+  try {
+    const repos = JSON.parse(gh(['repo', 'list', '--limit', '200', '--source', '--no-archived',
+      '--json', 'name,nameWithOwner,description,visibility,url,pushedAt,isFork']) || '[]');
+    repos.sort((a, b) => String(b.pushedAt || '').localeCompare(String(a.pushedAt || '')));
+    cb(null, { owner: status.user, repos });
+  } catch (e) { cb(new Error(ghErr(e))); }
+}
+
+// Clone an existing repo into a $HOME folder so it can be maintained + published
+// from ClaudeNav. If the target folder is already that repo (same origin), reuse
+// it rather than failing — the "I already have it locally" case. Reports the
+// live Pages URL when the repo already serves one.
+function importSite({ repo, parent }, cb) {
+  const status = ghStatus();
+  if (!status.installed) return cb(new Error('the GitHub CLI (gh) is not installed'));
+  if (!status.authed) return cb(new Error('not signed in to GitHub'));
+  const nwo = String(repo || '').trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(nwo)) return cb(new Error('pick a repository'));
+  const [owner, slug] = nwo.split('/');
+
+  const base = underHome(parent && String(parent).trim() ? parent : HOME);
+  if (!base) return cb(new Error('that location is outside your home directory'));
+  const cwd = path.join(base, slug);
+
+  try {
+    if (fs.existsSync(cwd) && fs.readdirSync(cwd).length) {
+      // Non-empty: only OK if it's already this same repo checked out here.
+      let origin = '';
+      try { origin = git(cwd, ['remote', 'get-url', 'origin']); } catch { /* not a repo */ }
+      const matches = origin && new RegExp(`[/:]${owner}/${slug}(\\.git)?/?$`, 'i').test(origin);
+      if (!matches) return cb(new Error(`a different folder named "${slug}" already exists here — rename or move it first`));
+      const pi = pagesInfo(nwo);
+      rememberSite(cwd);
+      return cb(null, { cwd, slug, owner, reused: true, repoUrl: `https://github.com/${nwo}`,
+        pagesUrl: pi.url || `https://${owner}.github.io/${slug}/`, pagesEnabled: pi.enabled });
+    }
+  } catch { /* unreadable — clone below will surface it */ }
+
+  try { gh(['repo', 'clone', nwo, cwd]); }
+  catch (e) { return cb(new Error('could not download the repository: ' + ghErr(e))); }
+
+  const pi = pagesInfo(nwo);
+  rememberSite(cwd);
+  cb(null, { cwd, slug, owner, repoUrl: `https://github.com/${nwo}`,
+    pagesUrl: pi.url || `https://${owner}.github.io/${slug}/`, pagesEnabled: pi.enabled });
+}
+
+// Turn on GitHub Pages for an existing repo (served from its default branch /
+// root) — for an imported site that wasn't publishing yet. Idempotent: an
+// already-enabled repo just returns its current URL.
+function enablePages({ repo }, cb) {
+  const status = ghStatus();
+  if (!status.authed) return cb(new Error('not signed in to GitHub'));
+  const nwo = String(repo || '').trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(nwo)) return cb(new Error('bad repo'));
+  const [owner, slug] = nwo.split('/');
+  let branch = 'main';
+  try { branch = gh(['api', `repos/${nwo}`, '--jq', '.default_branch']) || 'main'; } catch { /* assume main */ }
+  try { gh(['api', '-X', 'POST', `repos/${nwo}/pages`, '-f', `source[branch]=${branch}`, '-f', 'source[path]=/']); }
+  catch (e) {
+    const pi = pagesInfo(nwo);
+    if (pi.enabled) return cb(null, { pagesEnabled: true, pagesUrl: pi.url });
+    return cb(new Error(ghErr(e)));
+  }
+  const pi = pagesInfo(nwo);
+  cb(null, { pagesEnabled: true, pagesUrl: pi.url || `https://${owner}.github.io/${slug}/` });
+}
+
+// ---------------------------------------------------------------------------
+// Publish status — "is what I made actually live?" for a Pages-backed site.
+// The honest definition: working tree clean AND the pushed commit is the exact
+// commit GitHub Pages last built AND that build succeeded. Everything else is a
+// flavour of "not live", collapsed into plain-language states for non-devs:
+//   draft      — uncommitted or unpushed changes (not online yet)
+//   publishing — pushed, Pages still building (or built an older commit)
+//   live       — pushed commit is built and serving
+//   failed     — the Pages build errored
+//   offline    — repo has a GitHub remote but Pages isn't enabled
+//   local      — no GitHub remote (saved on this computer only)
+// The networked half (Pages build) is cached per-repo so callers can poll.
+// ---------------------------------------------------------------------------
+
+function gitTry(cwd, args, dflt = '') { try { return git(cwd, args); } catch { return dflt; } }
+
+function relTimeShort(iso) {
+  const t = Date.parse(iso || '');
+  if (!t) return '';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60); if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+const pagesCache = new Map(); // nwo -> { at, info }
+function pagesState(nwo) {
+  const c = pagesCache.get(nwo);
+  if (c && Date.now() - c.at < 30000) return c.info;
+  let info = { pagesEnabled: false, pagesUrl: null, buildStatus: null, builtCommit: null, builtAt: null };
+  try {
+    const pi = pagesInfo(nwo);
+    if (pi.enabled) {
+      info = { pagesEnabled: true, pagesUrl: pi.url, buildStatus: null, builtCommit: null, builtAt: null };
+      try {
+        const b = JSON.parse(gh(['api', `repos/${nwo}/pages/builds/latest`,
+          '--jq', '{status: .status, commit: .commit, updated_at: .updated_at}']));
+        info.buildStatus = b.status || null;
+        info.builtCommit = b.commit || null;
+        info.builtAt = b.updated_at || null;
+      } catch { /* enabled but never built yet — buildStatus stays null */ }
+    }
+  } catch { /* gh missing / offline — leave defaults, treated as unknown below */ }
+  pagesCache.set(nwo, { at: Date.now(), info });
+  return info;
+}
+function invalidatePages(nwo) { if (nwo) pagesCache.delete(nwo); }
+
+function repoNwo(cwd) {
+  const url = gitTry(cwd, ['remote', 'get-url', 'origin']);
+  const m = url.match(/[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  return m ? { owner: m[1], name: m[2], nwo: `${m[1]}/${m[2]}` } : null;
+}
+
+function siteStatus(cwd) {
+  const abs = underHome(cwd);
+  if (!abs || !fs.existsSync(abs)) return { state: 'unknown', label: 'Unknown' };
+  if (gitTry(abs, ['rev-parse', '--is-inside-work-tree']) !== 'true') return { state: 'nonrepo', label: 'Not a website project' };
+
+  const porcelain = gitTry(abs, ['status', '--porcelain']);
+  const dirty = !!porcelain;
+  const changeCount = dirty ? porcelain.split('\n').filter(Boolean).length : 0;
+
+  const r = repoNwo(abs);
+  if (!r) return { state: 'local', label: 'Saved on this computer only', dirty, changeCount, hasRemote: false };
+
+  const hasUpstream = !!gitTry(abs, ['rev-parse', '--abbrev-ref', '@{u}']);
+  const ahead = hasUpstream ? (parseInt(gitTry(abs, ['rev-list', '--count', '@{u}..HEAD'], '0'), 10) || 0) : 0;
+  const remoteHead = hasUpstream ? gitTry(abs, ['rev-parse', '@{u}']) : '';
+
+  const ps = pagesState(r.nwo);
+  const pagesUrl = ps.pagesUrl || `https://${r.owner}.github.io/${r.name}/`;
+  // "Is this a website?" — Pages already on, or created/imported via the wizard.
+  // Ordinary code repos (GitHub remote but neither) get state 'repo' and no pill.
+  const isSite = ps.pagesEnabled || knownSites.has(abs);
+  const base = { isSite, dirty, changeCount, ahead, hasRemote: true, nwo: r.nwo,
+    repoUrl: `https://github.com/${r.nwo}`, pagesEnabled: ps.pagesEnabled, pagesUrl, buildStatus: ps.buildStatus };
+  if (!isSite) return { state: 'repo', label: 'Code project', ...base };
+
+  let state, label, detail = '';
+  if (dirty || !hasUpstream || ahead > 0) {
+    state = 'draft'; label = 'Draft — changes not online yet';
+    const n = changeCount || ahead;
+    detail = n ? `${n} change${n === 1 ? '' : 's'} to publish` : 'changes to publish';
+  } else if (!ps.pagesEnabled) {
+    state = 'offline'; label = 'Not online yet';
+  } else if (ps.buildStatus === 'errored') {
+    state = 'failed'; label = 'Publishing failed';
+  } else if (ps.buildStatus === 'built' && ps.builtCommit && remoteHead && ps.builtCommit === remoteHead) {
+    state = 'live'; label = 'Published — live'; detail = relTimeShort(ps.builtAt);
+  } else {
+    state = 'publishing'; label = 'Publishing…'; detail = 'usually under a minute';
+  }
+  return { state, label, detail, ...base };
+}
+
+// The one-button "Publish": stage everything, commit (if there's anything to
+// commit), then push (setting upstream on the first push). Non-devs never see a
+// commit/push distinction — this is the whole ship-it action. Returns the fresh
+// status so the pill flips to "Publishing…" immediately.
+function publishSite({ cwd, message }, cb) {
+  const abs = underHome(cwd);
+  if (!abs) return cb(new Error('that folder is outside your home directory'));
+  if (gitTry(abs, ['rev-parse', '--is-inside-work-tree']) !== 'true') return cb(new Error('not a website project'));
+  const r = repoNwo(abs);
+  if (!r) return cb(new Error('this site has no GitHub connection yet'));
+  try {
+    if (gitTry(abs, ['status', '--porcelain'])) {
+      git(abs, ['add', '-A']);
+      execFileSync('git', ['-C', abs, 'commit', '-m', (message || '').trim() || 'Update website (ClaudeNav)'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    }
+    const hasUpstream = !!gitTry(abs, ['rev-parse', '--abbrev-ref', '@{u}']);
+    const branch = gitTry(abs, ['rev-parse', '--abbrev-ref', 'HEAD'], 'main');
+    const args = hasUpstream ? ['-C', abs, 'push'] : ['-C', abs, 'push', '-u', 'origin', branch];
+    execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    return cb(new Error((e.stderr || e.stdout || e.message || 'publish failed').toString().trim().slice(0, 300)));
+  }
+  invalidatePages(r.nwo); // force a fresh Pages read on the next status poll
+  cb(null, siteStatus(abs));
+}
+
 // Merge a session worktree's branch back into the repo's main checkout, then
 // remove the worktree. Refuses if the main checkout has uncommitted changes
 // (so we never clobber another session's in-flight work).
@@ -1994,6 +2359,63 @@ const server = http.createServer((req, res) => {
     return readBody(req, (err, body) => {
       if (err) return sendJSON(res, 400, { error: 'bad json' });
       gitInit(body.cwd, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/gh-status') {
+    try { return sendJSON(res, 200, ghStatus()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/site-create' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      createSite(body, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/gh-repos') {
+    return ghListRepos((e, info) => {
+      if (e) return sendJSON(res, 400, { error: e.message });
+      sendJSON(res, 200, info);
+    });
+  }
+
+  if (url.pathname === '/api/site-import' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      importSite(body, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/site-enable-pages' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      enablePages(body, (e, info) => {
+        if (e) return sendJSON(res, 400, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
+  }
+
+  if (url.pathname === '/api/site-status') {
+    try { return sendJSON(res, 200, siteStatus(url.searchParams.get('cwd') || '')); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/publish' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      publishSite(body, (e, info) => {
         if (e) return sendJSON(res, 400, { error: e.message });
         sendJSON(res, 200, { ok: true, ...info });
       });
