@@ -49,6 +49,38 @@ prerequisites (Rust must be present — `curl --proto '=https' --tlsv1.2 -sSf
 https://sh.rustup.rs | sh` once if not). See `src-tauri/README.md` for the
 internals and the Windows/Linux build path.
 
+## Desktop app (Windows)
+
+The same Tauri wrapper builds a native Windows app. There's no `install-app.sh`
+on Windows (it installs a macOS `.app`) — instead build the installer and run
+it:
+
+```powershell
+npm install            # once
+npm run app:build      # emits the installer under src-tauri\target\release\bundle\
+```
+
+Double-click the resulting `ClaudeNav_*.msi` (or the NSIS `.exe`) to install.
+ClaudeNav then launches by name from the **Start menu**, opens its own window,
+and manages the server itself — on launch it attaches to an already-running
+server on `127.0.0.1:4317` or starts `node server.js` and stops it on quit.
+
+Prerequisites: **Node 18+** (every Claude Code user already has it) and the
+[Rust toolchain](https://rustup.rs) + the WebView2 runtime (preinstalled on
+Windows 11) to *build*. Installed machines only need Node on `PATH`; the wrapper
+also probes the usual install dirs (`%ProgramFiles%\nodejs`, npm-global,
+nvm-windows, scoop) and honours `CLAUDENAV_NODE` if Node lives somewhere else.
+
+**Run at login:** unlike macOS there's no LaunchAgent. To have ClaudeNav start
+with Windows, drop a shortcut to it in the startup folder — press `Win+R`, run
+`shell:startup`, and put a shortcut to the installed ClaudeNav there. The app's
+own start-server-on-launch logic then keeps the dashboard available; a dedicated
+crash-restart service (the launchd/watchdog equivalent) isn't shipped.
+
+Note: the server's **terminal-opening** actions (resume in a terminal, `/login`
+re-auth) work on Windows via `cmd`, but some conveniences are still macOS-first —
+see the cross-platform notes in `src-tauri/README.md`.
+
 ## What it shows
 
 - **Projects** grouped by working directory, live ones first.

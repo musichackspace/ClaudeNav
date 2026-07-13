@@ -76,6 +76,26 @@ fn resolve_node() -> String {
             candidates.push(format!("{home}/.local/bin/node"));
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        // GUI-launched apps get a minimal PATH, so probe the usual install
+        // dirs explicitly — mirrors resolveClaudeBin() in server.js.
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            candidates.push(format!("{pf}\\nodejs\\node.exe"));
+        }
+        if let Ok(pf) = std::env::var("ProgramFiles(x86)") {
+            candidates.push(format!("{pf}\\nodejs\\node.exe"));
+        }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            // npm-global install and nvm-windows both drop node here.
+            candidates.push(format!("{appdata}\\npm\\node.exe"));
+            candidates.push(format!("{appdata}\\nvm\\node.exe"));
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            candidates.push(format!("{profile}\\scoop\\shims\\node.exe"));
+            candidates.push(format!("{profile}\\.local\\bin\\node.exe"));
+        }
+    }
 
     for cand in &candidates {
         let ok = Command::new(cand)
