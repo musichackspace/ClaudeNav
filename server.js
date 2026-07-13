@@ -725,16 +725,34 @@ function parseTranscript(filePath) {
 // when ClaudeNav is launched by launchd / systemd / a double-click the inherited
 // PATH is minimal and a plain 'claude' spawn fails with ENOENT. So: honor an
 // explicit CLAUDE_BIN, else trust PATH if it resolves, else probe the known
-// install locations before giving up.
+// install locations before giving up. Platform-aware: Windows has no `/bin/sh`
+// and installs to different paths, so it uses `where` + Windows candidates.
+const IS_WIN = process.platform === 'win32';
+let CLAUDE_BIN_OK = true; // false when we fell through to a bare 'claude' guess
 function resolveClaudeBin() {
   if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
-  // Trust PATH first (respects nvm / custom installs) — `command -v` via the shell.
+  // Trust PATH first (respects nvm / custom installs).
   try {
-    const onPath = execFileSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim();
-    if (onPath) return onPath;
+    const probe = IS_WIN
+      ? execFileSync('where', ['claude'], { encoding: 'utf8' })       // Windows: `where`
+      : execFileSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' });
+    const hits = probe.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (hits.length) {
+      // `where` can return several shims (claude, claude.cmd, claude.ps1). Node
+      // can't spawn a .cmd/.ps1 directly, so prefer a real .exe when present.
+      const pick = IS_WIN ? (hits.find(h => /\.exe$/i.test(h)) || hits[0]) : hits[0];
+      return pick;
+    }
   } catch { /* not on PATH; fall through to probing */ }
   const home = os.homedir();
-  const candidates = [
+  const candidates = IS_WIN ? [
+    // Native installer, then npm-global shims (%APPDATA%\npm), then ~/.local.
+    path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Programs', 'claude', 'claude.exe'),
+    path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'npm', 'claude.exe'),
+    path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'npm', 'claude.cmd'),
+    path.join(home, '.local', 'bin', 'claude.exe'),
+    path.join(home, '.local', 'bin', 'claude.cmd'),
+  ] : [
     path.join(home, '.local', 'bin', 'claude'),
     path.join(home, '.claude', 'local', 'claude'),
     '/opt/homebrew/bin/claude',
@@ -744,11 +762,39 @@ function resolveClaudeBin() {
   for (const c of candidates) {
     try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
   }
+  CLAUDE_BIN_OK = false;
   console.warn('[claudenav] WARNING: could not locate the `claude` binary — headless turns will fail with ENOENT. Set CLAUDE_BIN to its path.');
   return 'claude'; // last resort; will ENOENT, but with the warning above to explain it
 }
 const CLAUDE_BIN = resolveClaudeBin();
-console.log(`[claudenav] using claude binary: ${CLAUDE_BIN}`);
+console.log(`[claudenav] using claude binary: ${CLAUDE_BIN}${CLAUDE_BIN_OK ? '' : ' (NOT FOUND — set CLAUDE_BIN)'}`);
+
+// Plain-language, platform-aware guidance for when the `claude` binary can't be
+// found or spawned (ENOENT). Powers the chat error message and /api/setup-help.
+const MISSING_BIN_MSG =
+  "ClaudeNav can't find the `claude` command, so it can't run this turn. "
+  + "Make sure Claude Code is installed, then set the CLAUDE_BIN environment "
+  + "variable to its full path and restart the server.";
+function claudeSetupHelp() {
+  // Each step is { text, cmd? } — the UI renders `cmd` as a click-to-copy code
+  // chip, so keep prose in `text` and the exact command in `cmd`.
+  const steps = IS_WIN ? [
+    { text: 'Confirm Claude Code is installed — in PowerShell or cmd, run:', cmd: 'claude --version' },
+    { text: "If that fails, install it (see the docs below) — the native installer gives you a spawnable claude.exe." },
+    { text: 'Find the full path to the binary:', cmd: 'where claude' },
+    { text: "Set CLAUDE_BIN to that path (prefer a claude.exe over a .cmd shim — Node can't launch .cmd directly). In cmd:", cmd: 'setx CLAUDE_BIN "C:\\path\\to\\claude.exe"' },
+    { text: 'Restart ClaudeNav so it picks up CLAUDE_BIN (close and reopen the terminal/service), then retry your message.' },
+  ] : [
+    { text: 'Confirm Claude Code is installed:', cmd: 'claude --version' },
+    { text: 'Find its path:', cmd: 'command -v claude' },
+    { text: 'Set CLAUDE_BIN to that path and restart the server, e.g.:', cmd: 'CLAUDE_BIN=/path/to/claude node server.js' },
+    { text: 'Retry your message.' },
+  ];
+  return {
+    platform: process.platform, resolved: CLAUDE_BIN_OK, claudeBin: CLAUDE_BIN,
+    message: MISSING_BIN_MSG, docs: 'https://docs.anthropic.com/en/docs/claude-code/setup', steps,
+  };
+}
 // Sessions run with skipped permissions so the assistant can actually use tools
 // (matches how these terminal sessions were started). Set CLAUDE_SAFE=1 to omit.
 const SKIP_PERMS = process.env.CLAUDE_SAFE !== '1';
@@ -1180,8 +1226,13 @@ function drainQueue(sessionId) {
       // actionable as a bare exit code — translate them into plain guidance.
       // Auth wins over usage wins over a generic failure.
       let msg, kind = null;
+      // A missing/unspawnable `claude` binary throws ENOENT (or EINVAL for a
+      // bare .cmd shim on Windows) — a bare "spawn claude ENOENT" isn't
+      // actionable, so translate it into setup guidance the UI can act on.
+      const spawnFailed = err && (err.code === 'ENOENT' || err.code === 'EINVAL');
       if (sawAuthError) { msg = AUTH_ERR_MSG; kind = 'auth'; }
       else if (sawUsageError) { msg = usageErrorMessage(usageErrLine); kind = 'usage'; }
+      else if (spawnFailed) { msg = MISSING_BIN_MSG; kind = 'missing'; }
       else { msg = stderrTail || err.message || 'turn failed'; }
       lastChatError.set(sessionId, msg.trim().slice(0, 500));
       if (kind) lastChatErrorKind.set(sessionId, kind); else lastChatErrorKind.delete(sessionId);
@@ -2567,6 +2618,12 @@ const server = http.createServer((req, res) => {
     });
   }
 
+  if (url.pathname === '/api/setup-help') {
+    // Platform-aware steps to fix a missing/unspawnable `claude` binary. Powers
+    // the "Fix setup" help dialog the UI offers on a needsSetup chat error.
+    return sendJSON(res, 200, claudeSetupHelp());
+  }
+
   if (url.pathname === '/api/chat-status') {
     const id = url.searchParams.get('session') || '';
     const queued = (chatQueues.get(id) || []).length;
@@ -2579,6 +2636,7 @@ const server = http.createServer((req, res) => {
       // usage-limit toast) without pattern-matching the human-readable text.
       needsLogin: lastChatErrorKind.get(id) === 'auth',
       usageLimited: lastChatErrorKind.get(id) === 'usage',
+      needsSetup: lastChatErrorKind.get(id) === 'missing',
       partial: lp ? { text: lp.text, tools: lp.tools, ask: lp.ask || null } : null,
     });
   }

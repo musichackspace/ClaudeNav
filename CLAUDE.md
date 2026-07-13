@@ -77,13 +77,22 @@ removes both agents.
   built-ins; extraction failures fall back to a placeholder note. Unsupported
   types are rejected client-side with a warning toast.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
-  usageLimited, partial}`. `partial` is the in-flight assistant output
+  usageLimited, needsSetup, partial}`. `partial` is the in-flight assistant output
   (`{text, tools}`, block-level — the CLI doesn't stream tokens) or `null`.
   `needsLogin` is true on an auth failure; the UI then adds a "Re-login" button
   to the error toast (opens a terminal via `/api/open {login:true}`).
   `usageLimited` is true when the turn hit a usage/rate limit; the UI shows the
   server's plain-language `error` (which names the reset time when known, and
   suggests switching to a lighter model) without the scary "Turn error:" prefix.
+  `needsSetup` is true when the turn couldn't spawn the `claude` binary (ENOENT /
+  EINVAL — mostly a Windows/PATH problem); the UI swaps the cryptic
+  "spawn claude ENOENT" for the server's plain message plus a **"Fix setup"**
+  button that opens a help dialog fed by `/api/setup-help`.
+- `GET /api/setup-help` — `{platform, resolved, claudeBin, message, docs,
+  steps:[{text, cmd?}]}`: platform-aware guidance for locating/pointing at the
+  `claude` binary (Windows uses `where`/`setx CLAUDE_BIN`, Unix uses
+  `command -v`/env var). `resolved` is false when the server fell through to a
+  bare `claude` guess at startup. Drives the "Fix setup" dialog.
 - `POST /api/chat-cancel {session}` — SIGTERM the running turn (marked so it
   isn't logged as an error) and drop anything queued behind it.
 - `POST /api/session-mode {session, mode}` — pin the permission mode the next
@@ -236,12 +245,19 @@ removes both agents.
   is read-only (Claude proposes a plan without making changes). `CLAUDE_BIN`
   overrides the `claude` path.
 - **Finding `claude`**: `resolveClaudeBin()` honors `CLAUDE_BIN`, else trusts
-  `command -v claude`, else probes known install dirs (`~/.local/bin`,
-  `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`). This is
-  why headless turns work under launchd even though `claude` is off its minimal
-  PATH. If none resolve, it logs a WARNING at startup and turns fail with
-  `spawn claude ENOENT` — set `CLAUDE_BIN` to fix. The startup log prints the
-  resolved path (`[claudenav] using claude binary: …`).
+  PATH (`command -v claude` on Unix, `where claude` on Windows), else probes
+  known install dirs — Unix: `~/.local/bin`, `~/.claude/local`,
+  `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; Windows: the native
+  installer's `claude.exe` and the npm-global (`%APPDATA%\npm`) / `~/.local\bin`
+  shims. This is why headless turns work under launchd even though `claude` is
+  off its minimal PATH. On Windows it **prefers a `.exe`** because Node can't
+  spawn a `.cmd`/`.ps1` shim directly (that throws ENOENT/EINVAL). If none
+  resolve it sets `CLAUDE_BIN_OK=false`, logs a WARNING at startup, and turns
+  fail — but that failure is now caught (`err.code` ENOENT/EINVAL → chat error
+  kind `missing`, `needsSetup:true`) and shown as the "Fix setup" dialog rather
+  than a bare `spawn claude ENOENT`. Set `CLAUDE_BIN` to fix. The startup log
+  prints the resolved path (`[claudenav] using claude binary: …`, with
+  `(NOT FOUND — set CLAUDE_BIN)` appended when unresolved).
 - **Auth failures in headless turns**: an expired/revoked OAuth token surfaces
   as API 401 text (`AUTH_ERR_RE`), sometimes with exit 0 (the failure lands in
   an error `result`). `drainQueue` matches it and sets a "re-login via `/login`"

@@ -194,6 +194,10 @@
   /* Housekeeping panel */
   .hk { width: min(720px, 94%); max-height: 86vh; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; }
   .hk-body { overflow-y: auto; padding: 8px 16px 16px; }
+  .setup-steps { line-height: 1.7; padding-left: 20px; }
+  .setup-steps li { margin: 6px 0; }
+  .setup-plat, .setup-doc { color: var(--muted); font-size: 13px; }
+  .setup-cmd { background: var(--code-bg, rgba(127,127,127,.15)); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; word-break: break-all; }
   .repo { border: 1px solid var(--border); border-radius: 10px; margin-top: 12px; overflow: hidden; }
   .repo-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--panel); }
   .repo-name { font-weight: 600; }
@@ -613,6 +617,19 @@
   </div>
 </div>
 
+<div id="setupOverlay" class="overlay center">
+  <div class="hk">
+    <div class="chat-head">
+      <div class="ct">
+        <div class="ctitle">🔧 Set up the Claude Code CLI</div>
+        <div class="csub" id="setupSub">ClaudeNav couldn't find the <code>claude</code> command</div>
+      </div>
+      <button class="chat-close" id="setupClose" title="Close">×</button>
+    </div>
+    <div id="setupBody" class="hk-body"></div>
+  </div>
+</div>
+
 <div id="newProjOverlay" class="overlay center">
   <div class="hk np">
     <div class="chat-head">
@@ -998,6 +1015,48 @@ async function openLoginTerminal() {
     toast('Opened ' + termApp() + ' — finish /login there, then retry your message');
   } catch (e) {
     toast('Could not open terminal: ' + e.message, true);
+  }
+}
+
+// Setup-help dialog — shown when a headless turn fails because the `claude`
+// binary can't be found/spawned (the "spawn claude ENOENT" case, common on
+// Windows where the CLI isn't on the service's PATH). Terminal-opening is
+// macOS-only, so on other platforms we can't run the fix for the user — instead
+// we lay out the exact, platform-aware steps (from /api/setup-help) to resolve it.
+function closeSetupHelp() {
+  document.getElementById('setupOverlay').classList.remove('show');
+  document.body.classList.remove('overlay-open');
+}
+async function openSetupHelp() {
+  const ov = document.getElementById('setupOverlay');
+  ov.classList.add('show');
+  document.body.classList.add('overlay-open');
+  const body = document.getElementById('setupBody');
+  body.innerHTML = '<div class="empty">Loading setup steps…</div>';
+  try {
+    const r = await fetch('/api/setup-help');
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    const plat = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }[j.platform] || j.platform;
+    const steps = (j.steps || []).map(s => {
+      const cmd = s.cmd ? ` <code class="setup-cmd" title="Click to copy">${esc(s.cmd)}</code>` : '';
+      return `<li>${esc(s.text)}${cmd}</li>`;
+    }).join('');
+    const docs = j.docs
+      ? `<p class="setup-doc">Install docs: <a href="${esc(j.docs)}" target="_blank" rel="noopener">${esc(j.docs)}</a></p>`
+      : '';
+    body.innerHTML =
+      `<p>${esc(j.message)}</p>`
+      + `<p class="setup-plat">Detected platform: <b>${esc(plat)}</b>. `
+      + `Current binary guess: <code>${esc(j.claudeBin)}</code>${j.resolved ? '' : ' <b>(not found)</b>'}.</p>`
+      + `<ol class="setup-steps">${steps}</ol>`
+      + docs;
+    body.querySelectorAll('.setup-cmd').forEach(el => {
+      el.style.cursor = 'pointer';
+      el.onclick = () => navigator.clipboard.writeText(el.textContent).then(() => toast('Copied: ' + el.textContent));
+    });
+  } catch (e) {
+    body.innerHTML = '<div class="empty">Could not load setup steps: ' + esc(e.message) + '</div>';
   }
 }
 
@@ -1795,6 +1854,10 @@ async function checkChatStatus() {
         // guidance (with a reset time when known). Show it as-is, no scary
         // "Turn error:" prefix, and let it linger so it's readable.
         toast(j.error, true, { label: 'Dismiss', fn: () => {} });
+      } else if (j.needsSetup) {
+        // The `claude` binary couldn't be found/spawned — offer the fix steps
+        // instead of a cryptic "spawn claude ENOENT".
+        toast(j.error, true, { label: 'Fix setup', fn: openSetupHelp });
       } else {
         toast('Turn error: ' + j.error, true,
           j.needsLogin ? { label: 'Re-login', fn: openLoginTerminal } : null);
@@ -1965,7 +2028,11 @@ document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('overlay').addEventListener('click', e => {
   if (e.target.id === 'overlay') closeChat();
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); closeDashboard(); closeNewProject(); } });
+document.getElementById('setupClose').addEventListener('click', closeSetupHelp);
+document.getElementById('setupOverlay').addEventListener('click', e => {
+  if (e.target.id === 'setupOverlay') closeSetupHelp();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeChat(); closeHousekeeping(); closeViz(); closeDashboard(); closeNewProject(); closeSetupHelp(); } });
 
 // ---- Repo history visualiser ----------------------------------------------
 function closeViz() { document.getElementById('vizOverlay').classList.remove('show'); document.body.classList.remove('overlay-open'); }
