@@ -504,8 +504,78 @@ function openUrl(rawUrl, cb) {
   execFile(cmd, args, (err) => err ? cb(new Error(err.message)) : cb(null, { opened: u.href }));
 }
 
+// Windows: open a fresh console window running `command` and keep it open
+// (`cmd /k`). We keep `command` free of embedded paths/quotes — the login flows
+// only need the bare binary (`gh`/`claude`, resolved via the new shell's PATH),
+// and session-resume sets the window's cwd via the spawn option instead of a
+// `cd` — so there's nothing to quote and no injection surface. `start`'s first
+// argument is the window title.
+function openTerminalWindows({ cwd, sessionId, login, ghLogin }, cb) {
+  let command, startCwd;
+  if (ghLogin) command = 'gh auth login';
+  else if (login) command = 'claude /login';
+  else {
+    if (sessionId && !/^[\w-]+$/.test(sessionId)) return cb(new Error('bad session id'));
+    command = 'claude' + (sessionId ? ' --resume ' + sessionId : '');
+    startCwd = cwd;
+  }
+  let done = false;
+  const finish = (err) => { if (done) return; done = true; err ? cb(err) : cb(null, { ran: command }); };
+  try {
+    const child = spawn('cmd', ['/c', 'start', 'ClaudeNav', 'cmd', '/k', command], {
+      cwd: startCwd || os.homedir(), detached: true, stdio: 'ignore', windowsHide: false,
+    });
+    child.on('error', (e) => finish(new Error(e.message)));
+    child.unref();
+    // `start` returns at once; if cmd itself couldn't spawn, the error event
+    // fires within a tick, so treat "no error shortly after" as success.
+    setTimeout(() => finish(null), 150);
+  } catch (e) { finish(new Error(e.message)); }
+}
+
+// Linux: no single blessed terminal, so try the common emulators in order and
+// fall through on ENOENT. The command is the same bash string the macOS path
+// builds; `; exec bash` keeps the window open after it finishes so the user can
+// read the result. bash + args go through the spawn array (no shell re-quoting).
+// `-e` is honored by most; gnome-terminal wants `--`, xfce4-terminal wants `-x`.
+function openTerminalLinux({ cwd, sessionId, login, ghLogin }, cb) {
+  const shellCmd = ghLogin ? buildGhLoginCommand()
+    : login ? buildLoginCommand()
+    : buildShellCommand({ cwd, sessionId });
+  const inner = `${shellCmd}; exec bash`;
+  const attempts = [
+    ['x-terminal-emulator', ['-e', 'bash', '-c', inner]],
+    ['gnome-terminal', ['--', 'bash', '-c', inner]],
+    ['konsole', ['-e', 'bash', '-c', inner]],
+    ['xfce4-terminal', ['-x', 'bash', '-c', inner]],
+    ['xterm', ['-e', 'bash', '-c', inner]],
+  ];
+  let i = 0;
+  const tryNext = () => {
+    if (i >= attempts.length) {
+      return cb(new Error('no terminal emulator found (tried x-terminal-emulator, gnome-terminal, '
+        + 'konsole, xfce4-terminal, xterm) — '
+        + (ghLogin ? 'run `gh auth login`' : login ? 'run `claude /login`' : 'resume from a terminal') + ' yourself'));
+    }
+    const [bin, args] = attempts[i++];
+    let settled = false;
+    try {
+      const child = spawn(bin, args, { detached: true, stdio: 'ignore' });
+      child.on('error', () => { if (!settled) { settled = true; tryNext(); } });
+      child.unref();
+      // No error within a tick → the emulator launched.
+      setTimeout(() => { if (!settled) { settled = true; cb(null, { ran: shellCmd }); } }, 150);
+    } catch { tryNext(); }
+  };
+  tryNext();
+}
+
 function openTerminal({ cwd, sessionId, app, login, ghLogin }, cb) {
   if (!login && !ghLogin && !cwd) return cb(new Error('missing cwd'));
+
+  if (process.platform === 'win32') return openTerminalWindows({ cwd, sessionId, login, ghLogin }, cb);
+  if (process.platform !== 'darwin') return openTerminalLinux({ cwd, sessionId, login, ghLogin }, cb);
+
   const shellCmd = ghLogin ? buildGhLoginCommand()
     : login ? buildLoginCommand()
     : buildShellCommand({ cwd, sessionId });
@@ -1680,12 +1750,28 @@ function gitInit(cwd, cb) {
 
 function resolveGhBin() {
   if (process.env.GH_BIN) return process.env.GH_BIN;
+  const isWin = process.platform === 'win32';
   try {
-    const onPath = execFileSync('/bin/sh', ['-c', 'command -v gh'], { encoding: 'utf8' }).trim();
-    if (onPath) return onPath;
-  } catch { /* not on PATH; probe known dirs */ }
-  for (const c of ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh', path.join(HOME, '.local', 'bin', 'gh')]) {
-    try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
+    // `where` on Windows, POSIX `command -v` elsewhere. `where` can list several
+    // matches (one per line) — take the first.
+    const out = isWin
+      ? execFileSync('where', ['gh'], { encoding: 'utf8' })
+      : execFileSync('/bin/sh', ['-c', 'command -v gh'], { encoding: 'utf8' });
+    const first = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
+    if (first) return first;
+  } catch { /* not on PATH; probe known install dirs */ }
+  const candidates = isWin
+    ? [
+        // winget / MSI installer default, scoop, choco — all common on Windows.
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'GitHub CLI', 'gh.exe'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'GitHub CLI', 'gh.exe'),
+        path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'gh.exe'),
+        path.join(HOME, 'scoop', 'shims', 'gh.exe'),
+        'C:\\ProgramData\\chocolatey\\bin\\gh.exe',
+      ]
+    : ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh', path.join(HOME, '.local', 'bin', 'gh')];
+  for (const c of candidates) {
+    try { if (c && fs.existsSync(c)) return c; } catch { /* ignore */ }
   }
   return null;
 }
@@ -1701,11 +1787,14 @@ function ghErr(e) {
   return (e.stderr || e.stdout || e.message || 'GitHub operation failed').toString().trim().slice(0, 400);
 }
 
-// {installed, authed, user} — cheap enough to call on every wizard open.
+// {installed, authed, user, platform} — cheap enough to call on every wizard
+// open. `platform` lets the UI word the install/sign-in hints per-OS (the
+// terminal-opening + install steps differ on Windows vs macOS).
 function ghStatus() {
-  if (!GH_BIN) return { installed: false, authed: false, user: null };
-  try { return { installed: true, authed: true, user: gh(['api', 'user', '--jq', '.login']) }; }
-  catch { return { installed: true, authed: false, user: null }; }
+  const platform = process.platform;
+  if (!GH_BIN) return { installed: false, authed: false, user: null, platform };
+  try { return { installed: true, authed: true, user: gh(['api', 'user', '--jq', '.login']), platform }; }
+  catch { return { installed: true, authed: false, user: null, platform }; }
 }
 
 // Repo/URL-safe slug from a human site name. Empty if nothing usable is left.

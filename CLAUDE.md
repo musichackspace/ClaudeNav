@@ -129,11 +129,15 @@ removes both agents.
   start as a plain session in the chosen folder (no worktree — there's no HEAD
   to branch from yet); the per-project "+ New session" worktree flow stays for
   established repos.
-- `GET /api/gh-status` — `{installed, authed, user}` for the **website wizard**
-  (the guided "+ New project" path for non-devs). Uses the `gh` CLI as the
-  engine — `resolveGhBin()` mirrors `resolveClaudeBin()` (`GH_BIN`, then
-  `command -v gh`, then known dirs). `installed` is false if `gh` is missing;
-  `authed`/`user` come from `gh api user`.
+- `GET /api/gh-status` — `{installed, authed, user, platform}` for the **website
+  wizard** (the guided "+ New project" path for non-devs). Uses the `gh` CLI as
+  the engine — `resolveGhBin()` mirrors `resolveClaudeBin()` and is
+  cross-platform: `GH_BIN`, then `where gh` (Windows) / `command -v gh` (POSIX),
+  then known dirs — including Windows install locations (`%ProgramFiles%\GitHub
+  CLI\gh.exe`, winget Links, scoop shims, choco). `installed` is false if `gh` is
+  missing; `authed`/`user` come from `gh api user`. `platform` (`process.platform`)
+  lets the wizard word install/sign-in hints per-OS (winget one-liner + "new
+  terminal window" on Windows).
 - `POST /api/site-create {name, parent?}` — provision a website end-to-end:
   make a `$HOME`-bounded folder (slug of `name`, defaults under `$HOME`), write
   a starter `index.html`/`README.md`, `git init` + first commit, `gh repo create
@@ -197,8 +201,17 @@ removes both agents.
 - `POST /api/open` — open Terminal/iTerm (resume or new). With `{login:true}`
   it instead opens the terminal running `claude /login` (from `$HOME`, no cwd
   needed) — the re-auth path for expired OAuth credentials, which is
-  interactive-only and can't be run headlessly. `/uploads/<name>` — serves
-  pasted attachments (images and PDFs).
+  interactive-only and can't be run headlessly. `{ghLogin:true}` is the same for
+  `gh auth login` (GitHub-account onboarding for the website wizard).
+  **Cross-platform**: macOS uses AppleScript (`osascript`), Windows opens a new
+  console window (`cmd /c start … cmd /k <cmd>` — the login flows run the bare
+  `gh`/`claude` binary via the fresh shell's PATH, and session-resume sets the
+  window cwd via the spawn option, so nothing needs quoting or is injectable),
+  and Linux tries the common emulators in order (`x-terminal-emulator`,
+  `gnome-terminal`, `konsole`, `xfce4-terminal`, `xterm`), running the same bash
+  command with `; exec bash` to keep the window open. If none of those launch
+  (or the platform is unknown) it returns an actionable error naming the command
+  to run by hand. `/uploads/<name>` — serves pasted attachments (images and PDFs).
 - `GET /api/version` — `{bootId, bootHead, head, branch, dirty, behind, hasRemote,
   canUpdate}`. `bootId`/`bootHead` describe the running process; `head`/`behind`
   reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
@@ -291,6 +304,11 @@ removes both agents.
       still appears all at once when it completes.
 - [ ] **Bulk commit**: wrap has per-folder commit/push and a "wrap all safe"
       orchestrator, but no standalone "commit all unsaved".
-- [ ] **Cross-platform**: terminal-opening is macOS/AppleScript only; other
-      platforms get the read-only dashboard + headless chat.
+- [ ] **Cross-platform**: terminal-opening works on macOS (AppleScript),
+      Windows (`cmd /k` console), and Linux (first of x-terminal-emulator /
+      gnome-terminal / konsole / xfce4-terminal / xterm that launches) — covers
+      the `gh`/`claude` login onboarding and session-resume. A headless Linux box
+      with no emulator (or an unknown platform) still gets the read-only
+      dashboard + headless chat, with an actionable "run this yourself" error
+      when it tries to open a terminal.
 - [ ] **LICENSE holder** is "JB"; adjust if it should be the org.

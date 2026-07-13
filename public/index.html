@@ -262,6 +262,8 @@
   .wiz-gh .dot { width: 8px; height: 8px; border-radius: 99px; background: var(--muted); flex: none; }
   .wiz-gh .dot.ok { background: var(--live); }
   .wiz-gh .dot.no { background: #f85149; }
+  .wiz-gh code { font-family: ui-monospace, monospace; font-size: 11.5px; background: var(--panel);
+                 border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; word-break: break-all; }
   .wiz-live { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; padding: 12px 14px;
               border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
   .wiz-live a { color: #58a6ff; font-family: ui-monospace, monospace; font-size: 12.5px; word-break: break-all; }
@@ -2657,17 +2659,27 @@ async function renderGhStatus(el, onReady) {
   el.innerHTML = '<span class="dot"></span><span>Checking GitHub…</span>';
   let s;
   try { s = await (await fetch('/api/gh-status')).json(); } catch { s = {}; }
+  const isWin = s.platform === 'win32';
   if (!s.installed) {
-    el.innerHTML = '<span class="dot no"></span><span>GitHub CLI not found — install it from '
-      + '<a href="#" class="gh-cli">cli.github.com</a>, then reopen this.</span>';
+    // Windows: winget is the one-liner most people have; keep the download link
+    // as a fallback. macOS/Linux: point at the download page.
+    const hint = isWin
+      ? 'GitHub CLI not found — install it (in a terminal: <code>winget install --id GitHub.cli</code>) '
+        + 'or from <a href="#" class="gh-cli">cli.github.com</a>, then <a href="#" class="gh-retry">re-check</a>.'
+      : 'GitHub CLI not found — install it from <a href="#" class="gh-cli">cli.github.com</a>, '
+        + 'then <a href="#" class="gh-retry">re-check</a>.';
+    el.innerHTML = '<span class="dot no"></span><span>' + hint + '</span>';
     el.querySelector('.gh-cli').onclick = (e) => { e.preventDefault(); openExternal('https://cli.github.com'); };
+    el.querySelector('.gh-retry').onclick = (e) => { e.preventDefault(); renderGhStatus(el, onReady); };
   } else if (!s.authed) {
+    const opens = isWin ? 'opens a new terminal window' : 'opens a terminal';
     el.innerHTML = '<span class="dot no"></span><span>Not signed in — '
-      + '<a href="#" class="gh-login">Connect GitHub</a> (opens a terminal), then <a href="#" class="gh-retry">re-check</a>.</span>';
+      + '<a href="#" class="gh-login">Connect GitHub</a> (' + opens + ' running <code>gh auth login</code>), '
+      + 'then <a href="#" class="gh-retry">re-check</a>.</span>';
     el.querySelector('.gh-login').onclick = async (e) => {
       e.preventDefault();
-      try { await api('/api/open', { ghLogin: true }); toast('Follow the GitHub sign-in in the terminal, then re-check.'); }
-      catch (err) { toast('Could not open terminal: ' + err.message, true); }
+      try { await api('/api/open', { ghLogin: true }); toast('Follow the GitHub sign-in in the terminal window, then re-check.'); }
+      catch (err) { toast('Could not open a terminal for sign-in: ' + err.message + ' — you can run `gh auth login` yourself, then re-check.', true); }
     };
     el.querySelector('.gh-retry').onclick = (e) => { e.preventDefault(); renderGhStatus(el, onReady); };
   } else {
