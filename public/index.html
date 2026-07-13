@@ -418,7 +418,8 @@
   .msg.streaming .bubble { opacity: .9; border-left: 2px solid var(--accent); padding-left: 8px; }
   .typing { display: inline-block; animation: pulse 1s ease-in-out infinite; }
   .chat-compose button.stop { background: rgba(248,81,73,.16); color: #f85149; border-color: rgba(248,81,73,.4); font-weight: 600; }
-  .chat-compose { border-top: 1px solid var(--border); padding: 12px 14px; }
+  .chat-compose { border-top: 1px solid var(--border); padding: 12px 14px; position: relative; }
+  .chat-compose.dragging { outline: 2px dashed var(--accent); outline-offset: -4px; background: rgba(217,119,87,.08); }
   .chat-compose textarea {
     width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
     border-radius: 8px; padding: 10px; font: inherit; resize: vertical; min-height: 52px;
@@ -1559,6 +1560,29 @@ function ensureNotifyPermission() {
 // Stop flashing once the user looks at the tab.
 window.addEventListener('focus', () => { if (titleFlash) { clearInterval(titleFlash); document.title = 'ClaudeNav' + (chat.name ? ' · ' + chat.name : ''); } });
 
+// Drag-and-drop attach. Bound once to the persistent compose container (its
+// innerHTML is re-rendered per session, but the element itself stays), so the
+// whole compose area — not just the textarea — is a drop target. A document-
+// level guard swallows stray drops so the browser never navigates away from a
+// file dropped just outside the zone.
+(function setupDropZone() {
+  const zone = document.getElementById('chatCompose');
+  if (!zone) return;
+  let depth = 0; // dragenter/leave fire per child; count to avoid flicker
+  const clear = () => { depth = 0; zone.classList.remove('dragging'); };
+  const hasFiles = ev => [...(ev.dataTransfer?.types || [])].includes('Files');
+  zone.addEventListener('dragenter', ev => { if (!hasFiles(ev)) return; ev.preventDefault(); depth++; zone.classList.add('dragging'); });
+  zone.addEventListener('dragover', ev => { if (hasFiles(ev)) ev.preventDefault(); });
+  zone.addEventListener('dragleave', ev => { if (!hasFiles(ev)) return; if (--depth <= 0) clear(); });
+  zone.addEventListener('drop', ev => {
+    clear();
+    if (ev.dataTransfer?.files?.length) { ev.preventDefault(); addFiles(ev.dataTransfer.files); }
+  });
+  // Don't let a miss (dropped outside the zone) navigate the tab to the file.
+  document.addEventListener('dragover', ev => { if (hasFiles(ev)) ev.preventDefault(); });
+  document.addEventListener('drop', ev => { if (hasFiles(ev)) ev.preventDefault(); });
+})();
+
 function renderCompose(p, s) {
   const el = document.getElementById('chatCompose');
   const liveNote = p.liveTerminals > 0
@@ -1587,10 +1611,6 @@ function renderCompose(p, s) {
     const files = [...(ev.clipboardData?.items || [])]
       .filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
     if (files.some(f => attachKind(f))) { ev.preventDefault(); addFiles(files); }
-  });
-  box.addEventListener('dragover', ev => { ev.preventDefault(); });
-  box.addEventListener('drop', ev => {
-    if (ev.dataTransfer?.files?.length) { ev.preventDefault(); addFiles(ev.dataTransfer.files); }
   });
   renderAttachments();
   box.focus();
