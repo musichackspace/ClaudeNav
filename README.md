@@ -49,11 +49,23 @@ prerequisites (Rust must be present — `curl --proto '=https' --tlsv1.2 -sSf
 https://sh.rustup.rs | sh` once if not). See `src-tauri/README.md` for the
 internals and the Windows/Linux build path.
 
-## Desktop app (Windows)
+## Windows
 
-The same Tauri wrapper builds a native Windows app. There's no `install-app.sh`
-on Windows (it installs a macOS `.app`) — instead build the installer and run
-it:
+**One-click start:** double-click **`start-claudenav.cmd`** in the repo. It finds
+Node, starts the server, and opens the dashboard in your browser — no build step.
+Keep the window open while you use ClaudeNav; close it to stop the server. If a
+copy is already running it just opens the dashboard. (Only Node 18+ is required;
+the script also probes the usual install dirs if `node` isn't on `PATH`.)
+
+**Run at login:** press `Win+R`, run `shell:startup`, and drop a shortcut to
+`start-claudenav.cmd` in that folder. Unlike macOS there's no LaunchAgent, so a
+dedicated crash-restart service (the launchd/watchdog equivalent) isn't shipped.
+
+### Native app (optional)
+
+Prefer a real installed app that launches by name from the Start menu? The same
+Tauri wrapper builds a native Windows installer. There's no `install-app.sh` on
+Windows (it installs a macOS `.app`) — instead build the installer and run it:
 
 ```powershell
 npm install            # once
@@ -70,12 +82,8 @@ Prerequisites: **Node 18+** (every Claude Code user already has it) and the
 Windows 11) to *build*. Installed machines only need Node on `PATH`; the wrapper
 also probes the usual install dirs (`%ProgramFiles%\nodejs`, npm-global,
 nvm-windows, scoop) and honours `CLAUDENAV_NODE` if Node lives somewhere else.
-
-**Run at login:** unlike macOS there's no LaunchAgent. To have ClaudeNav start
-with Windows, drop a shortcut to it in the startup folder — press `Win+R`, run
-`shell:startup`, and put a shortcut to the installed ClaudeNav there. The app's
-own start-server-on-launch logic then keeps the dashboard available; a dedicated
-crash-restart service (the launchd/watchdog equivalent) isn't shipped.
+To start it at login, put a shortcut to the installed app in `shell:startup`
+(same as above).
 
 Note: the server's **terminal-opening** actions (resume in a terminal, `/login`
 re-auth) work on Windows via `cmd`, but some conveniences are still macOS-first —
