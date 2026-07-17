@@ -1465,8 +1465,8 @@ async function openIsolated(cwd, name) {
       // don't dead-end — start a plain session in the folder itself (same as
       // "+ New project" does for a fresh folder). Isolation is an upgrade for
       // repos, not a precondition for having a session.
-      if (/not a git repo/i.test(j.error || '')) {
-        toast('Not a git repo — starting a plain session here (no isolation)');
+      if (/not a git repo|no commits yet|invalid reference: HEAD/i.test(j.error || '')) {
+        toast('No git history yet — starting a plain session here (no isolation)');
         openNewChat(cwd, name);
         return;
       }

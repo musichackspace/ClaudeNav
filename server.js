@@ -1694,6 +1694,11 @@ function gitWorktreeAdd(cwd, name, cb) {
   if (!knownCwds().has(cwd)) return cb(new Error('unknown working directory'));
   try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') return cb(new Error('not a git repo')); }
   catch { return cb(new Error('not a git repo')); }
+  // A repo with no commits has no HEAD to branch a worktree from ("fatal:
+  // invalid reference: HEAD"). Treat it like a non-repo: the caller falls back
+  // to a plain session in the folder itself.
+  try { git(cwd, ['rev-parse', '--verify', '-q', 'HEAD']); }
+  catch { return cb(new Error('no commits yet')); }
   const leaf = sanitizeLeaf(name) + '-' + crypto.randomBytes(3).toString('hex');
   const branch = 'session/' + leaf;
   const wtPath = path.join(cwd, '.claude', 'worktrees', leaf);
