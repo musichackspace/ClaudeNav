@@ -1190,7 +1190,18 @@ async function openIsolated(cwd, name) {
       body: JSON.stringify({ cwd, name }),
     });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error || 'failed');
+    if (!r.ok) {
+      // A worktree needs a repo to branch from. If this folder isn't one,
+      // don't dead-end — start a plain session in the folder itself (same as
+      // "+ New project" does for a fresh folder). Isolation is an upgrade for
+      // repos, not a precondition for having a session.
+      if (/not a git repo/i.test(j.error || '')) {
+        toast('Not a git repo — starting a plain session here (no isolation)');
+        openNewChat(cwd, name);
+        return;
+      }
+      throw new Error(j.error || 'failed');
+    }
     load(); // surface the new worktree in the session list
     openNewChat(j.path, name + ' (' + j.branch + ')');
     toast('Worktree ' + j.branch);
