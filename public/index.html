@@ -1560,27 +1560,33 @@ function ensureNotifyPermission() {
 // Stop flashing once the user looks at the tab.
 window.addEventListener('focus', () => { if (titleFlash) { clearInterval(titleFlash); document.title = 'ClaudeNav' + (chat.name ? ' · ' + chat.name : ''); } });
 
-// Drag-and-drop attach. Bound once to the persistent compose container (its
-// innerHTML is re-rendered per session, but the element itself stays), so the
-// whole compose area — not just the textarea — is a drop target. A document-
-// level guard swallows stray drops so the browser never navigates away from a
-// file dropped just outside the zone.
+// Drag-and-drop attach. The WHOLE window is the drop target — people drop a
+// file onto the conversation, not the little compose bar — so a file dropped
+// anywhere attaches to the currently-open chat (and the browser never navigates
+// away from it). Bound once at load to `document`; listeners live for the page.
 (function setupDropZone() {
-  const zone = document.getElementById('chatCompose');
-  if (!zone) return;
-  let depth = 0; // dragenter/leave fire per child; count to avoid flicker
-  const clear = () => { depth = 0; zone.classList.remove('dragging'); };
-  const hasFiles = ev => [...(ev.dataTransfer?.types || [])].includes('Files');
-  zone.addEventListener('dragenter', ev => { if (!hasFiles(ev)) return; ev.preventDefault(); depth++; zone.classList.add('dragging'); });
-  zone.addEventListener('dragover', ev => { if (hasFiles(ev)) ev.preventDefault(); });
-  zone.addEventListener('dragleave', ev => { if (!hasFiles(ev)) return; if (--depth <= 0) clear(); });
-  zone.addEventListener('drop', ev => {
-    clear();
-    if (ev.dataTransfer?.files?.length) { ev.preventDefault(); addFiles(ev.dataTransfer.files); }
-  });
-  // Don't let a miss (dropped outside the zone) navigate the tab to the file.
+  let depth = 0; // dragenter/leave fire per element; count to avoid flicker
+  const composeEl = () => document.getElementById('chatCompose');
+  const chatOpen = () => !!document.getElementById('composeBox');
+  // `dataTransfer.types` is a frozen array in modern browsers but a DOMStringList
+  // in older ones — support both so the file check never throws (a throw here
+  // would skip preventDefault and the browser would refuse the drop entirely).
+  const hasFiles = ev => {
+    const t = ev.dataTransfer && ev.dataTransfer.types;
+    if (!t) return false;
+    return t.includes ? t.includes('Files') : Array.prototype.indexOf.call(t, 'Files') >= 0;
+  };
+  const setHL = on => { const z = composeEl(); if (z) z.classList.toggle('dragging', !!on && chatOpen()); };
+  const clear = () => { depth = 0; setHL(false); };
+  document.addEventListener('dragenter', ev => { if (!hasFiles(ev)) return; ev.preventDefault(); depth++; setHL(true); });
   document.addEventListener('dragover', ev => { if (hasFiles(ev)) ev.preventDefault(); });
-  document.addEventListener('drop', ev => { if (hasFiles(ev)) ev.preventDefault(); });
+  document.addEventListener('dragleave', ev => { if (!hasFiles(ev)) return; if (--depth <= 0) clear(); });
+  document.addEventListener('drop', ev => {
+    if (!hasFiles(ev)) return;
+    ev.preventDefault(); clear();
+    if (!chatOpen()) { toast('Open a session first, then drop files to attach', true); return; }
+    if (ev.dataTransfer.files && ev.dataTransfer.files.length) addFiles(ev.dataTransfer.files);
+  });
 })();
 
 function renderCompose(p, s) {
