@@ -2342,7 +2342,10 @@ function serveStatic(res, urlPath) {
     if (err) { res.writeHead(404); return res.end('not found'); }
     const ext = path.extname(fp);
     const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
-    res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream' });
+    // No caching: this is a single-file local app that redeploys on every commit,
+    // and a stale cached index.html would silently keep running old JS long after
+    // a relaunch. `no-store` guarantees a reload always fetches the current build.
+    res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(buf);
   });
 }
