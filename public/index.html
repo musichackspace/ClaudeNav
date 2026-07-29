@@ -1259,7 +1259,14 @@ document.getElementById('folders').addEventListener('click', e => {
   if (!card) return;
   if (card.dataset.cwd && collapsed.has(card.dataset.cwd)) { setCollapsed(card.dataset.cwd, false); render(); }
   const target = document.getElementById(card.dataset.goto);
-  if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); target.style.outline = '2px solid var(--accent)'; setTimeout(() => target.style.outline = '', 1200); }
+  if (target) {
+    // Offset by the sticky header height so the section top isn't hidden under it.
+    const header = document.querySelector('header');
+    const offset = (header ? header.getBoundingClientRect().height : 0) + 8;
+    const top = target.getBoundingClientRect().top + window.scrollY - offset;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    target.style.outline = '2px solid var(--accent)'; setTimeout(() => target.style.outline = '', 1200);
+  }
 });
 
 document.getElementById('content').addEventListener('click', e => {
