@@ -25,6 +25,17 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const UPLOADS_DIR = path.join(os.homedir(), '.claude', 'claudenav-uploads');
 try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch {}
+// Headless turns are spawned detached, with stdout/stderr redirected here, so a
+// turn keeps running (and its output keeps landing on disk) even if the server
+// restarts mid-turn — the way a terminal session would. RUNS_FILE/QUEUE_FILE
+// persist enough to rediscover an in-flight turn and its backlog on the next
+// boot (see reconcileOnBoot).
+// Keyed by PORT so two ClaudeNav instances (e.g. a second one on another port)
+// never share turn state and try to reattach to each other's turns.
+const TURNS_DIR = path.join(os.homedir(), '.claude', `claudenav-turns-${PORT}`);
+try { fs.mkdirSync(TURNS_DIR, { recursive: true }); } catch {}
+const RUNS_FILE = path.join(os.homedir(), '.claude', `claudenav-runs-${PORT}.json`);
+const QUEUE_FILE = path.join(os.homedir(), '.claude', `claudenav-queue-${PORT}.json`);
 
 // ---------------------------------------------------------------------------
 // Context window resolution
@@ -84,140 +95,188 @@ function contextWindowFor(s, parentCwd) {
 // Session parsing (with mtime-keyed cache so repeat scans are cheap)
 // ---------------------------------------------------------------------------
 
-const cache = new Map(); // filePath -> { mtimeMs, data }
+const cache = new Map(); // filePath -> { mtimeMs, size, offset, acc, data }
+
+// A fresh, empty parse accumulator. Everything parseSessionFile derives lives
+// here so a growing transcript can be folded incrementally (see below) rather
+// than re-read whole on every poll.
+function freshAcc() {
+  return {
+    title: null, lastPrompt: null, firstUserPrompt: null,
+    firstTs: null, lastTs: null, cwd: null, firstCwd: null,
+    gitBranch: null, version: null, sessionId: null,
+    userMsgCount: 0, assistantTurns: 0, models: new Set(),
+    tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+    contextTokens: 0, peakContextTokens: 0,
+    lastEventType: null, lastStopReason: null, permissionMode: null,
+    lastModel: null, lastUserText: null, lastAssistantText: null,
+  };
+}
+
+// Fold one transcript line into the accumulator. Order-dependent (later records
+// overwrite earlier ones), which is exactly why the incremental path may only
+// append newer lines — never re-fold or skip out of order.
+function foldLine(a, line) {
+  if (!line) return;
+  let o;
+  try { o = JSON.parse(line); } catch { return; }
+
+  if (o.sessionId && !a.sessionId) a.sessionId = o.sessionId;
+  if (o.permissionMode) a.permissionMode = o.permissionMode;
+  if (o.cwd) { a.cwd = o.cwd; if (!a.firstCwd) a.firstCwd = o.cwd; }
+  if (o.gitBranch) a.gitBranch = o.gitBranch;
+  if (o.version) a.version = o.version;
+  if (o.timestamp) {
+    if (!a.firstTs) a.firstTs = o.timestamp;
+    a.lastTs = o.timestamp;
+  }
+
+  switch (o.type) {
+    case 'ai-title':
+      if (o.aiTitle) a.title = o.aiTitle;
+      break;
+    case 'last-prompt':
+      if (o.lastPrompt) a.lastPrompt = o.lastPrompt;
+      break;
+    case 'user': {
+      a.userMsgCount++;
+      const c = o.message && o.message.content;
+      const text = typeof c === 'string'
+        ? c
+        : Array.isArray(c)
+          ? c.filter(p => p && p.type === 'text').map(p => p.text).join(' ')
+          : null;
+      const isToolResult = Array.isArray(c) && c.length
+        && c.every(p => p && p.type === 'tool_result');
+      // Many "user" records aren't a human taking a turn: tool results, hook
+      // output, and slash-command machinery (`<local-command-stdout>Bye!`,
+      // `<task-notification>…`, `<command-name>…`). Counting these as the last
+      // conversational event makes a wrapped session look mid-turn ("you said
+      // bye" → flagged interrupted). Only genuine prose moves the turn pointer.
+      const synthetic = o.isMeta || isToolResult || !text || !text.trim()
+        || /^<\/?(local-command-stdout|local-command-stderr|command-name|command-message|command-args|task-notification|system-reminder|bash-input|bash-stdout|bash-stderr|user-prompt-submit-hook)\b/.test(text.trim());
+      if (synthetic) break;
+      a.lastEventType = 'user';
+      if (!a.firstUserPrompt) a.firstUserPrompt = text.trim();
+      a.lastUserText = text.trim(); // latest real user message — for the sign-off ack check
+      break;
+    }
+    case 'assistant': {
+      a.lastEventType = 'assistant';
+      const m = o.message || {};
+      if (m.model && m.model !== '<synthetic>') { a.models.add(m.model); a.lastModel = m.model; }
+      if (m.stop_reason !== undefined) a.lastStopReason = m.stop_reason;
+      // Keep the text of the latest assistant message that actually said
+      // something (tool-only turns carry no text) — used to tell "I'm asking
+      // you something" apart from "work delivered, nothing pending".
+      const at = Array.isArray(m.content)
+        ? m.content.filter(p => p && p.type === 'text').map(p => p.text).join('\n')
+        : (typeof m.content === 'string' ? m.content : '');
+      if (at && at.trim()) a.lastAssistantText = at.trim();
+      const u = m.usage;
+      if (u) {
+        a.assistantTurns++;
+        a.tokens.input += u.input_tokens || 0;
+        a.tokens.output += u.output_tokens || 0;
+        a.tokens.cacheCreation += u.cache_creation_input_tokens || 0;
+        a.tokens.cacheRead += u.cache_read_input_tokens || 0;
+        // Most recent turn's context = everything fed in for that turn.
+        a.contextTokens = (u.input_tokens || 0)
+          + (u.cache_read_input_tokens || 0)
+          + (u.cache_creation_input_tokens || 0);
+        if (a.contextTokens > a.peakContextTokens) a.peakContextTokens = a.contextTokens;
+      }
+      break;
+    }
+  }
+}
+
+// Project the accumulator into the shape callers consume.
+function accToData(a, stat, filePath) {
+  return {
+    sessionId: a.sessionId || path.basename(filePath, '.jsonl'),
+    title: a.title || a.firstUserPrompt || '(untitled)',
+    lastPrompt: a.lastPrompt || a.firstUserPrompt || '',
+    firstUserPrompt: a.firstUserPrompt || '',
+    cwd: a.cwd || '',
+    firstCwd: a.firstCwd || a.cwd || '',
+    gitBranch: a.gitBranch || '',
+    version: a.version || '',
+    userMsgCount: a.userMsgCount,
+    assistantTurns: a.assistantTurns,
+    models: [...a.models],
+    lastModel: a.lastModel,
+    lastModelChoice: modelChoice(a.lastModel),
+    tokens: a.tokens,
+    contextTokens: a.contextTokens,
+    peakContextTokens: a.peakContextTokens,
+    lastEventType: a.lastEventType,
+    lastStopReason: a.lastStopReason,
+    permissionMode: a.permissionMode,
+    lastUserText: a.lastUserText,
+    lastAssistantText: a.lastAssistantText,
+    firstTs: a.firstTs,
+    lastTs: a.lastTs,
+    mtimeMs: stat.mtimeMs,
+    sizeBytes: stat.size,
+    filePath,
+  };
+}
+
+// Read a byte range [start, end) from a file without slurping the whole thing —
+// the incremental path reads only the bytes appended since the last parse.
+function readRange(filePath, start, end) {
+  const len = end - start;
+  if (len <= 0) return Buffer.alloc(0);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const out = Buffer.allocUnsafe(len);
+    let got = 0;
+    while (got < len) {
+      const n = fs.readSync(fd, out, got, len - got, start + got);
+      if (n === 0) break;
+      got += n;
+    }
+    return got === len ? out : out.subarray(0, got);
+  } finally { fs.closeSync(fd); }
+}
 
 function parseSessionFile(filePath, stat) {
   const cached = cache.get(filePath);
   if (cached && cached.mtimeMs === stat.mtimeMs) return cached.data;
 
-  let title = null;
-  let lastPrompt = null;
-  let firstUserPrompt = null;
-  let firstTs = null;
-  let lastTs = null;
-  let cwd = null;
-  let firstCwd = null; // launch dir — the folder the CLI filed this transcript under (resume must run here)
-  let gitBranch = null;
-  let version = null;
-  let sessionId = null;
-  let userMsgCount = 0;
-  let assistantTurns = 0;
-  const models = new Set();
-  const tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-  let contextTokens = 0; // size of the most recent turn's context window
-  let peakContextTokens = 0; // largest context any turn reached (window proof)
-  let lastEventType = null; // 'user' | 'assistant' — last conversational record
-  let lastStopReason = null; // stop_reason of the most recent assistant turn
-  let permissionMode = null; // permission mode the most recent turn ran under
-  let lastModel = null; // model id the most recent assistant turn ran under
-  let lastUserText = null; // text of the most recent user message (for ack detection)
-  let lastAssistantText = null; // text of the most recent assistant message (for "awaiting you?" detection)
-
-  const content = fs.readFileSync(filePath, 'utf8');
-  for (const line of content.split('\n')) {
-    if (!line) continue;
-    let o;
-    try { o = JSON.parse(line); } catch { continue; }
-
-    if (o.sessionId && !sessionId) sessionId = o.sessionId;
-    if (o.permissionMode) permissionMode = o.permissionMode;
-    if (o.cwd) { cwd = o.cwd; if (!firstCwd) firstCwd = o.cwd; }
-    if (o.gitBranch) gitBranch = o.gitBranch;
-    if (o.version) version = o.version;
-    if (o.timestamp) {
-      if (!firstTs) firstTs = o.timestamp;
-      lastTs = o.timestamp;
+  // Incremental append: transcripts only ever grow (Claude Code appends
+  // newline-delimited records). When we've parsed this file before and it has
+  // only grown, fold just the new bytes into the cached accumulator instead of
+  // re-reading megabytes on every poll. Anything else (first sight, file
+  // shrank/rewound, or a torn read last time) falls back to a full parse.
+  let acc, offset;
+  if (cached && cached.acc && stat.size > cached.size) {
+    acc = cached.acc;
+    // Only fold complete lines; stop at the last newline so a record still
+    // being written isn't parsed half-formed. Bytes after it are re-read next
+    // time (offset advances only past the final newline).
+    const chunk = readRange(filePath, cached.offset, stat.size);
+    const nl = chunk.lastIndexOf(0x0a);
+    if (nl >= 0) {
+      const text = chunk.subarray(0, nl).toString('utf8');
+      for (const line of text.split('\n')) foldLine(acc, line);
+      offset = cached.offset + nl + 1;
+    } else {
+      offset = cached.offset; // no complete line yet — leave the tail for later
     }
-
-    switch (o.type) {
-      case 'ai-title':
-        if (o.aiTitle) title = o.aiTitle;
-        break;
-      case 'last-prompt':
-        if (o.lastPrompt) lastPrompt = o.lastPrompt;
-        break;
-      case 'user': {
-        userMsgCount++;
-        const c = o.message && o.message.content;
-        const text = typeof c === 'string'
-          ? c
-          : Array.isArray(c)
-            ? c.filter(p => p && p.type === 'text').map(p => p.text).join(' ')
-            : null;
-        const isToolResult = Array.isArray(c) && c.length
-          && c.every(p => p && p.type === 'tool_result');
-        // Many "user" records aren't a human taking a turn: tool results, hook
-        // output, and slash-command machinery (`<local-command-stdout>Bye!`,
-        // `<task-notification>…`, `<command-name>…`). Counting these as the last
-        // conversational event makes a wrapped session look mid-turn ("you said
-        // bye" → flagged interrupted). Only genuine prose moves the turn pointer.
-        const synthetic = o.isMeta || isToolResult || !text || !text.trim()
-          || /^<\/?(local-command-stdout|local-command-stderr|command-name|command-message|command-args|task-notification|system-reminder|bash-input|bash-stdout|bash-stderr|user-prompt-submit-hook)\b/.test(text.trim());
-        if (synthetic) break;
-        lastEventType = 'user';
-        if (!firstUserPrompt) firstUserPrompt = text.trim();
-        lastUserText = text.trim(); // latest real user message — for the sign-off ack check
-        break;
-      }
-      case 'assistant': {
-        lastEventType = 'assistant';
-        const m = o.message || {};
-        if (m.model && m.model !== '<synthetic>') { models.add(m.model); lastModel = m.model; }
-        if (m.stop_reason !== undefined) lastStopReason = m.stop_reason;
-        // Keep the text of the latest assistant message that actually said
-        // something (tool-only turns carry no text) — used to tell "I'm asking
-        // you something" apart from "work delivered, nothing pending".
-        const at = Array.isArray(m.content)
-          ? m.content.filter(p => p && p.type === 'text').map(p => p.text).join('\n')
-          : (typeof m.content === 'string' ? m.content : '');
-        if (at && at.trim()) lastAssistantText = at.trim();
-        const u = m.usage;
-        if (u) {
-          assistantTurns++;
-          tokens.input += u.input_tokens || 0;
-          tokens.output += u.output_tokens || 0;
-          tokens.cacheCreation += u.cache_creation_input_tokens || 0;
-          tokens.cacheRead += u.cache_read_input_tokens || 0;
-          // Most recent turn's context = everything fed in for that turn.
-          contextTokens = (u.input_tokens || 0)
-            + (u.cache_read_input_tokens || 0)
-            + (u.cache_creation_input_tokens || 0);
-          if (contextTokens > peakContextTokens) peakContextTokens = contextTokens;
-        }
-        break;
-      }
-    }
+  } else {
+    acc = freshAcc();
+    const content = fs.readFileSync(filePath, 'utf8');
+    const nl = content.lastIndexOf('\n');
+    const complete = nl >= 0 ? content.slice(0, nl) : content;
+    for (const line of complete.split('\n')) foldLine(acc, line);
+    // Byte offset of the parsed prefix (utf8 length, not string length).
+    offset = nl >= 0 ? Buffer.byteLength(content.slice(0, nl + 1), 'utf8') : Buffer.byteLength(content, 'utf8');
   }
 
-  const data = {
-    sessionId: sessionId || path.basename(filePath, '.jsonl'),
-    title: title || firstUserPrompt || '(untitled)',
-    lastPrompt: lastPrompt || firstUserPrompt || '',
-    firstUserPrompt: firstUserPrompt || '',
-    cwd: cwd || '',
-    firstCwd: firstCwd || cwd || '',
-    gitBranch: gitBranch || '',
-    version: version || '',
-    userMsgCount,
-    assistantTurns,
-    models: [...models],
-    lastModel,
-    lastModelChoice: modelChoice(lastModel),
-    tokens,
-    contextTokens,
-    peakContextTokens,
-    lastEventType,
-    lastStopReason,
-    permissionMode,
-    lastUserText,
-    lastAssistantText,
-    firstTs,
-    lastTs,
-    mtimeMs: stat.mtimeMs,
-    sizeBytes: stat.size,
-    filePath,
-  };
-  cache.set(filePath, { mtimeMs: stat.mtimeMs, data });
+  const data = accToData(acc, stat, filePath);
+  cache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, offset, acc, data });
   return data;
 }
 
@@ -262,6 +321,22 @@ function getLiveTerminals() {
     } catch { /* process may have exited */ }
   }
   return { byCwd, ttys, pidsByCwd };
+}
+
+// Liveness detection spawns `ps` plus one `lsof` per live `claude` process —
+// hundreds of ms when `lsof` is slow (network mounts, many fds). The server is
+// single-threaded, so doing it inline on every 5s /api/sessions poll can stall
+// the event loop long enough for the watchdog's health probe to time out and
+// hard-kill us. Cache it briefly: the poll reuses a recent scan instead of
+// re-spawning every time. Callers that need ground truth (closeSession, about
+// to kill pids) call getLiveTerminals() directly.
+let _liveCache = { at: 0, data: null };
+const LIVE_TTL = Number(process.env.CLAUDENAV_LIVE_TTL_MS) || 4000;
+function liveTerminals() {
+  const now = Date.now();
+  if (_liveCache.data && now - _liveCache.at < LIVE_TTL) return _liveCache.data;
+  _liveCache = { at: now, data: getLiveTerminals() };
+  return _liveCache.data;
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +437,7 @@ function computeStatus(s) {
 }
 
 function buildData() {
-  const { byCwd: liveByCwd } = getLiveTerminals();
+  const { byCwd: liveByCwd } = liveTerminals();
   const projects = new Map(); // cwd -> { cwd, name, liveTerminals, liveTtys, sessions: [] }
 
   let projectDirs = [];
@@ -898,8 +973,37 @@ function effectiveMode(sessionId) {
 
 const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_TURN_TIMEOUT_MS) || 15 * 60 * 1000;
 
-const runningChats = new Map(); // sessionId -> { child, startedAt, timer, killed }
-const chatQueues = new Map();   // sessionId -> [text, ...] turns waiting their turn
+const runningChats = new Map(); // sessionId -> turn entry (see spawnTurn / reattachTurn)
+const chatQueues = new Map();   // sessionId -> [{text, cwd}, ...] turns waiting their turn
+
+// A live turn: SIGTERM the child if we spawned it this process, else (a turn we
+// reattached to after a restart) signal its pid directly.
+function killEntry(e, sig = 'SIGTERM') {
+  try { if (e && e.child) e.child.kill(sig); else if (e && e.pid) process.kill(e.pid, sig); } catch {}
+}
+function isAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+
+// Persist just enough to rediscover in-flight turns and the queue after a
+// restart. Written on every start/finish and queue change; small and frequent,
+// so best-effort (a failed write just means a turn we can't reattach to — it
+// still runs to completion and lands in the transcript).
+function persistRuns() {
+  const obj = {};
+  for (const [id, e] of runningChats) {
+    if (!e.pid) continue;
+    obj[id] = { pid: e.pid, startedAt: e.startedAt, cwd: e.cwd,
+      outFile: e.outFile, errFile: e.errFile, mode: e.mode, model: e.model };
+  }
+  try { fs.writeFileSync(RUNS_FILE, JSON.stringify(obj)); } catch {}
+}
+function persistQueue() {
+  const obj = {};
+  for (const [id, q] of chatQueues) if (q && q.length) obj[id] = q;
+  try {
+    if (Object.keys(obj).length) fs.writeFileSync(QUEUE_FILE, JSON.stringify(obj));
+    else fs.rmSync(QUEUE_FILE, { force: true });
+  } catch {}
+}
 const lastChatError = new Map(); // sessionId -> error string
 const lastChatErrorKind = new Map(); // sessionId -> 'auth' | 'usage' | null (for structured UI flags)
 // Live (in-flight) assistant output for a running turn, surfaced via chat-status
@@ -1077,6 +1181,7 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
   if (!chatQueues.has(sessionId)) chatQueues.set(sessionId, []);
   const q = chatQueues.get(sessionId);
   q.push({ text: prompt, cwd });
+  persistQueue();
   const position = (runningChats.has(sessionId) ? 1 : 0) + q.length - 1;
   drainQueue(sessionId);
   cb(null, { running: true, queued: position });
@@ -1112,14 +1217,14 @@ function ingestStreamLine(sessionId, line) {
 }
 
 // Stop a running turn the moment it asks a question (see ingestStreamLine).
-// SIGTERM (not cancel) so finish() doesn't log it as an error and Claude Code
-// flushes the question to the transcript; the UI renders it from there.
+// SIGTERM (not cancel) so finalizeTurn doesn't log it as an error and Claude
+// Code flushes the question to the transcript; the UI renders it from there.
 function pauseForQuestion(sessionId) {
   const entry = runningChats.get(sessionId);
   if (!entry || entry.killed) return;
   entry.killed = true;          // graceful: not an error, not a user cancel
   if (entry.timer) clearTimeout(entry.timer);
-  try { entry.child.kill('SIGTERM'); } catch {}
+  killEntry(entry);             // a spawned turn finalizes via 'exit'; a reattached one via tick
 }
 
 // Auth failures don't crash the CLI cleanly — they surface as API 401 text in
@@ -1185,109 +1290,245 @@ function usageErrorMessage(line) {
     : `You’ve reached your Claude usage limit (see the usage bars up top). ${tail}`;
 }
 
-function drainQueue(sessionId) {
-  if (runningChats.has(sessionId)) return;
-  const q = chatQueues.get(sessionId);
-  if (!q || !q.length) return;
-  const { text, cwd } = q.shift();
-  lastChatError.delete(sessionId);
-  lastChatErrorKind.delete(sessionId);
+const TAIL_MS = Number(process.env.CLAUDENAV_TAIL_MS) || 400; // log-tail poll interval
+const INTERRUPTED_MSG = 'This turn was interrupted before it finished (the server restarted). '
+  + 'Any progress it made was saved to the transcript — send your message again to continue where it left off.';
 
+// A fresh turn entry. All the streaming/finalize bookkeeping lives here so a
+// turn can be driven identically whether we spawned it this process (has a
+// `child`) or reattached to it after a restart (has only a `pid`).
+function mkEntry(sessionId, base) {
+  return {
+    startedAt: Date.now(), killed: false, finalizing: false, reattached: false,
+    outOff: 0, errOff: 0,           // bytes of each log already folded
+    sawAuth: false, sawUsage: false, usageErrLine: '', stderrTail: '',
+    sawResult: false, sawErrResult: false,
+    ...base,
+  };
+}
+
+// Read whatever's new in a turn's stdout/stderr logs and fold it in: update the
+// live preview, and watch for auth/usage failures. This is the single reader
+// for both live and reattached turns — the logs on disk are the source of
+// truth, so a restart loses no output. `flush` also folds a trailing partial
+// line (used once at finalize, when no more will be written).
+function pumpLogs(sessionId, flush) {
+  const e = runningChats.get(sessionId);
+  if (!e) return;
+  // stdout — newline-delimited stream-json. Only fold complete lines unless
+  // flushing, so a record still mid-write isn't parsed half-formed.
+  try {
+    const size = fs.statSync(e.outFile).size;
+    if (size > e.outOff) {
+      const chunk = readRange(e.outFile, e.outOff, size);
+      let upto = chunk.length;
+      if (!flush) { const nl = chunk.lastIndexOf(0x0a); upto = nl >= 0 ? nl + 1 : 0; }
+      if (upto > 0) {
+        e.outOff += upto;
+        for (const line of chunk.subarray(0, upto).toString('utf8').split('\n')) {
+          if (!line.trim()) continue;
+          // Auth/usage phrases appear constantly in normal output — match only
+          // an error result's own message (see errorSignalText), never raw text.
+          const sig = errorSignalText(line);
+          if (sig) {
+            if (!e.sawAuth && AUTH_ERR_RE.test(sig)) e.sawAuth = true;
+            if (!e.sawUsage && USAGE_ERR_RE.test(sig)) { e.sawUsage = true; e.usageErrLine = sig; }
+          }
+          // A terminal `result` line means the turn actually finished — that's
+          // how we tell "done" from "interrupted" when reattaching to a pid.
+          try { const o = JSON.parse(line); if (o.type === 'result') { e.sawResult = true; if (o.is_error) e.sawErrResult = true; } } catch {}
+          ingestStreamLine(sessionId, line);
+        }
+      }
+    }
+  } catch { /* log not created yet / vanished — ignore */ }
+  // stderr — the CLI's dedicated error channel; scan a rolling tail raw.
+  try {
+    const size = fs.statSync(e.errFile).size;
+    if (size > e.errOff) {
+      const chunk = readRange(e.errFile, e.errOff, size);
+      e.errOff += chunk.length;
+      e.stderrTail = (e.stderrTail + chunk.toString('utf8')).slice(-2000);
+      if (!e.sawAuth && AUTH_ERR_RE.test(e.stderrTail)) e.sawAuth = true;
+      if (!e.sawUsage && USAGE_ERR_RE.test(e.stderrTail)) { e.sawUsage = true; e.usageErrLine = e.stderrTail; }
+    }
+  } catch { /* ignore */ }
+}
+
+// One periodic pump. For a turn we reattached to (no child handle), also detect
+// the process finishing by watching its pid — that's our only completion signal.
+function tick(sessionId) {
+  const e = runningChats.get(sessionId);
+  if (!e) return;
+  pumpLogs(sessionId, false);
+  // A reattached turn (no child handle) is done when it either produced its
+  // terminal result — the authoritative "finished" signal, robust to pid reuse —
+  // or its pid is gone. sawResult ⇒ a clean finish; pid gone without it ⇒ interrupted.
+  if (e.reattached && (e.sawResult || (e.pid && !isAlive(e.pid)))) {
+    finalizeTurn(sessionId, null, { interrupted: true });
+  }
+}
+
+// Wind a turn down exactly once: final flush, translate any failure into
+// actionable guidance, drop live state + logs, then start the next queued turn.
+function finalizeTurn(sessionId, err, opts = {}) {
+  const e = runningChats.get(sessionId);
+  if (!e || e.finalizing) return;
+  e.finalizing = true;
+  if (e.timer) clearTimeout(e.timer);
+  if (e.tailTimer) clearInterval(e.tailTimer);
+  pumpLogs(sessionId, true);                   // fold the tail before deciding
+  runningChats.delete(sessionId);
+  livePartial.delete(sessionId);
+
+  // "Interrupted" only counts if the turn never produced its terminal result —
+  // a turn that finished cleanly just before we noticed the pid is gone is done,
+  // not interrupted.
+  const interrupted = !!opts.interrupted && !e.sawResult;
+  if (!e.killed && (err || e.sawAuth || e.sawUsage || interrupted)) {
+    // Precedence: auth (401) > usage (429/limit) > missing binary > interrupted
+    // > generic. Auth/usage surface even on exit 0, so they win over a code.
+    let msg, kind = null;
+    const spawnFailed = err && (err.code === 'ENOENT' || err.code === 'EINVAL');
+    if (e.sawAuth) { msg = AUTH_ERR_MSG; kind = 'auth'; }
+    else if (e.sawUsage) { msg = usageErrorMessage(e.usageErrLine); kind = 'usage'; }
+    else if (spawnFailed) { msg = MISSING_BIN_MSG; kind = 'missing'; }
+    else if (interrupted) { msg = INTERRUPTED_MSG; kind = 'interrupted'; }
+    else { msg = e.stderrTail || (err && err.message) || 'turn failed'; }
+    lastChatError.set(sessionId, msg.trim().slice(0, 500));
+    if (kind) lastChatErrorKind.set(sessionId, kind); else lastChatErrorKind.delete(sessionId);
+  }
+  try { fs.rmSync(e.outFile, { force: true }); fs.rmSync(e.errFile, { force: true }); } catch {}
+  persistRuns();
+  drainQueue(sessionId); // start the next queued turn, if any
+  maybeRelaunch();       // if a relaunch was deferred, fire it once fully idle
+}
+
+// Spawn one turn, DETACHED, with stdout/stderr redirected to per-turn log files.
+// Detaching (new process group) + redirecting to files (not parent-owned pipes)
+// is what lets the turn outlive a server restart, the way a terminal session
+// would: the CLI keeps running and keeps writing here, and the next boot
+// reattaches via the persisted pid (see reconcileOnBoot).
+function spawnTurn(sessionId, text, cwd, mode, model) {
   // First turn of a brand-new session creates it at our chosen id; later turns
-  // (and all turns of existing sessions) continue it. stream-json + --verbose
-  // lets us read assistant blocks as they land (claude still writes the
-  // transcript file regardless of output format).
+  // (and all turns of existing sessions) resume it. stream-json + --verbose lets
+  // us read assistant blocks as they land.
   const exists = findSessionFile(sessionId);
   const base = exists ? ['--resume', sessionId] : ['--session-id', sessionId];
   const args = [...base, '-p', text, '--output-format', 'stream-json', '--verbose'];
-  // Permission mode: bypassPermissions keeps the historical skip-flag behavior
-  // (honoring CLAUDE_SAFE); any other mode is passed through to the CLI.
-  const mode = effectiveMode(sessionId);
+  // bypassPermissions keeps the historical skip-flag behavior (honoring
+  // CLAUDE_SAFE); any other mode is passed straight through to the CLI.
   if (mode === 'bypassPermissions') {
     if (SKIP_PERMS) args.push('--dangerously-skip-permissions');
     else args.push('--permission-mode', 'default');
   } else {
     args.push('--permission-mode', mode);
   }
-  // Model override: pass the chosen model id through to the CLI. Unset = inherit
-  // whatever the CLI/account default is.
-  const model = effectiveModel(sessionId);
   if (model) args.push('--model', model);
 
-  // stdin='ignore' (= `< /dev/null`): a headless `-p` turn reads no input, and
-  // leaving stdin an open pipe makes the CLI warn ("no stdin data received in
-  // 3s") and stall waiting on it.
-  const child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  const outFile = path.join(TURNS_DIR, sessionId + '.out');
+  const errFile = path.join(TURNS_DIR, sessionId + '.err');
+  let outFd = null, errFd = null, child;
+  try {
+    outFd = fs.openSync(outFile, 'w');         // truncate any prior turn's logs
+    errFd = fs.openSync(errFile, 'w');
+    // stdin ignored: a -p turn reads none, and an open stdin pipe makes the CLI
+    // warn ("no stdin data received in 3s") and stall. detached:true makes the
+    // child its own process-group leader so it survives our restart.
+    child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['ignore', outFd, errFd], detached: true });
+  } catch (err) {
+    try { if (outFd != null) fs.closeSync(outFd); } catch {}
+    try { if (errFd != null) fs.closeSync(errFd); } catch {}
+    // Couldn't even spawn (missing binary) — record a stub so finalizeTurn can
+    // turn ENOENT/EINVAL into the "Fix setup" guidance, then wind down.
+    runningChats.set(sessionId, mkEntry(sessionId, { pid: null, child: null, cwd, mode, model, outFile, errFile }));
+    return finalizeTurn(sessionId, err);
+  }
+  try { fs.closeSync(outFd); fs.closeSync(errFd); } catch {} // the child holds its own dups
+  child.unref();
+
+  const e = mkEntry(sessionId, { pid: child.pid, child, cwd, mode, model, outFile, errFile });
   livePartial.set(sessionId, { text: '', tools: [], ask: null, updatedAt: Date.now() });
+  runningChats.set(sessionId, e);
+  persistRuns();
 
-  let buf = '';
-  let stderrTail = '';
-  let sawAuthError = false;
-  let sawUsageError = false;
-  let usageErrLine = '';                      // the matching line, for reset-time parsing
-  child.stdout.on('data', chunk => {
-    buf += chunk.toString();
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-      if (line.trim()) {
-        // Auth and usage phrases show up constantly in assistant prose, tool
-        // output, and echoed result text — so match only against an error
-        // result's own message (see errorSignalText), never the raw line.
-        const sig = errorSignalText(line);
-        if (sig) {
-          if (!sawAuthError && AUTH_ERR_RE.test(sig)) sawAuthError = true;
-          if (!sawUsageError && USAGE_ERR_RE.test(sig)) { sawUsageError = true; usageErrLine = sig; }
-        }
-        ingestStreamLine(sessionId, line);
-      }
-    }
-    if (buf.length > (1 << 20)) buf = buf.slice(-(1 << 16)); // guard a pathological no-newline line
-  });
-  child.stderr.on('data', chunk => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
-    if (!sawAuthError && AUTH_ERR_RE.test(stderrTail)) sawAuthError = true;
-    if (!sawUsageError && USAGE_ERR_RE.test(stderrTail)) { sawUsageError = true; usageErrLine = stderrTail; }
-  });
-
-  const finish = (err) => {
-    const entry = runningChats.get(sessionId);
-    if (!entry) return;                       // already finalized (close + error both fired)
-    if (entry.timer) clearTimeout(entry.timer);
-    runningChats.delete(sessionId);
-    livePartial.delete(sessionId);
-    // Auth failure wins even on exit 0: the CLI sometimes exits clean after
-    // writing the 401 to the transcript, and "exited with code 1" (or silence)
-    // isn't actionable — tell the user to re-login instead.
-    if (!entry.killed && (err || sawAuthError || sawUsageError)) {
-      // Auth (401) and usage (429/limit) both surface even on exit 0 and aren't
-      // actionable as a bare exit code — translate them into plain guidance.
-      // Auth wins over usage wins over a generic failure.
-      let msg, kind = null;
-      // A missing/unspawnable `claude` binary throws ENOENT (or EINVAL for a
-      // bare .cmd shim on Windows) — a bare "spawn claude ENOENT" isn't
-      // actionable, so translate it into setup guidance the UI can act on.
-      const spawnFailed = err && (err.code === 'ENOENT' || err.code === 'EINVAL');
-      if (sawAuthError) { msg = AUTH_ERR_MSG; kind = 'auth'; }
-      else if (sawUsageError) { msg = usageErrorMessage(usageErrLine); kind = 'usage'; }
-      else if (spawnFailed) { msg = MISSING_BIN_MSG; kind = 'missing'; }
-      else { msg = stderrTail || err.message || 'turn failed'; }
-      lastChatError.set(sessionId, msg.trim().slice(0, 500));
-      if (kind) lastChatErrorKind.set(sessionId, kind); else lastChatErrorKind.delete(sessionId);
-    }
-    drainQueue(sessionId); // start the next queued turn, if any
-  };
-  child.on('error', err => finish(err));
-  child.on('close', code => finish(code === 0 ? null : new Error('claude exited with code ' + code)));
-
-  const entry = { child, startedAt: Date.now(), killed: false };
-  entry.timer = setTimeout(() => {
-    entry.killed = true;
+  child.on('error', err => finalizeTurn(sessionId, err));
+  child.on('exit', code => finalizeTurn(sessionId, code === 0 ? null : new Error('claude exited with code ' + code)));
+  e.tailTimer = setInterval(() => tick(sessionId), TAIL_MS);
+  e.timer = setTimeout(() => {
+    e.killed = true;
     lastChatError.set(sessionId, 'turn timed out and was stopped');
     lastChatErrorKind.delete(sessionId);
-    try { child.kill('SIGTERM'); } catch {}
+    killEntry(e);
   }, TURN_TIMEOUT_MS);
-  runningChats.set(sessionId, entry);
+}
+
+function drainQueue(sessionId) {
+  if (runningChats.has(sessionId)) return;
+  const q = chatQueues.get(sessionId);
+  if (!q || !q.length) return;
+  const { text, cwd } = q.shift();
+  persistQueue();
+  lastChatError.delete(sessionId);
+  lastChatErrorKind.delete(sessionId);
+  spawnTurn(sessionId, text, cwd, effectiveMode(sessionId), effectiveModel(sessionId));
+}
+
+// Reattach to a turn that was still running when a previous server process
+// exited: no child handle, so we tail its logs and watch its pid for
+// completion. Replays the log already on disk so the live view isn't blank.
+function reattachTurn(sessionId, r) {
+  const e = mkEntry(sessionId, {
+    pid: r.pid, child: null, cwd: r.cwd, mode: r.mode, model: r.model,
+    outFile: r.outFile, errFile: r.errFile,
+  });
+  e.startedAt = r.startedAt || Date.now();
+  e.reattached = true;
+  livePartial.set(sessionId, { text: '', tools: [], ask: null, updatedAt: Date.now() });
+  runningChats.set(sessionId, e);
+  pumpLogs(sessionId, false);                  // catch up on output written before this boot
+  // Already finished before we got here (result in the log)? Finalize now
+  // rather than waiting on a pid that may have been recycled.
+  if (e.sawResult) return finalizeTurn(sessionId, null, { interrupted: true });
+  e.tailTimer = setInterval(() => tick(sessionId), TAIL_MS);
+  const left = Math.max(30 * 1000, TURN_TIMEOUT_MS - (Date.now() - e.startedAt));
+  e.timer = setTimeout(() => {
+    e.killed = true;
+    lastChatError.set(sessionId, 'turn timed out and was stopped');
+    lastChatErrorKind.delete(sessionId);
+    killEntry(e);
+    finalizeTurn(sessionId, null);
+  }, left);
+}
+
+// On boot, rediscover in-flight turns and the queue a previous process left
+// behind, so a restart mid-turn is invisible: a turn still running is reattached
+// and finishes normally; one that died in the gap is finalized from its logs
+// (surfacing an "interrupted" notice only if it never produced a result).
+function reconcileOnBoot() {
+  let runs = {}, queue = {};
+  try { runs = JSON.parse(fs.readFileSync(RUNS_FILE, 'utf8')) || {}; } catch {}
+  try { queue = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8')) || {}; } catch {}
+  for (const [id, r] of Object.entries(runs)) {
+    if (!/^[\w-]+$/.test(id) || !r || !r.outFile) continue;
+    if (r.pid && isAlive(r.pid)) {
+      reattachTurn(id, r);
+    } else {
+      // Died before we could reattach — set up a transient entry and finalize
+      // from whatever its logs captured.
+      runningChats.set(id, mkEntry(id, {
+        pid: r.pid, child: null, cwd: r.cwd, mode: r.mode, model: r.model,
+        outFile: r.outFile, errFile: r.errFile,
+      }));
+      finalizeTurn(id, null, { interrupted: true });
+    }
+  }
+  persistRuns();
+  for (const [id, q] of Object.entries(queue)) {
+    if (/^[\w-]+$/.test(id) && Array.isArray(q) && q.length) chatQueues.set(id, q);
+  }
+  persistQueue();
+  for (const id of chatQueues.keys()) drainQueue(id);
 }
 
 // Stop the running turn for a session and discard anything queued behind it.
@@ -1296,24 +1537,28 @@ function chatCancel(sessionId, cb) {
   const q = chatQueues.get(sessionId);
   const dropped = q ? q.length : 0;
   if (q) q.length = 0;
+  persistQueue();
   const entry = runningChats.get(sessionId);
   if (!entry && !dropped) return cb(new Error('nothing running to stop'));
   if (entry) {
-    entry.killed = true;                      // so finish() doesn't log it as an error
-    if (entry.timer) clearTimeout(entry.timer);
-    try { entry.child.kill('SIGTERM'); } catch {}
+    entry.killed = true;                      // so finalizeTurn doesn't log it as an error
+    killEntry(entry);
+    // A spawned turn finalizes via its 'exit' handler; a reattached turn has
+    // none, so finalize it here (SIGTERM is on its way regardless).
+    if (entry.reattached) finalizeTurn(sessionId, null);
   }
   lastChatError.delete(sessionId);
   lastChatErrorKind.delete(sessionId);
   cb(null, { stopped: !!entry, dropped });
 }
 
-// Kill any in-flight headless turns when the server stops.
+// The server stopping must NOT take running turns with it: they're detached and
+// keep running (and writing their transcript + logs) across our restart, the
+// way a terminal session would. We persist their pids/logs so the next boot
+// reattaches (see reconcileOnBoot). Queued turns are persisted too.
 function shutdown() {
-  for (const { child, timer } of runningChats.values()) {
-    if (timer) clearTimeout(timer);
-    try { child.kill('SIGTERM'); } catch {}
-  }
+  persistRuns();
+  persistQueue();
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
@@ -1381,10 +1626,35 @@ function versionInfo() {
   };
 }
 
+// A relaunch (in-app update, or the watchdog auto-applying a new commit) that
+// arrives mid-turn is deferred until every turn has finished, so a deploy never
+// interrupts active work. maybeRelaunch fires once the server goes idle.
+let pendingRelaunch = null; // { pull } while a relaunch waits for turns to drain
+function relaunchNow(pull) {
+  if (pull) { try { git(REPO_DIR, ['pull', '--ff-only']); } catch { /* keep running the current code */ } }
+  persistRuns();
+  persistQueue();
+  process.exit(42); // run-server.sh treats 42 as "relaunch now"
+}
+function maybeRelaunch() {
+  if (pendingRelaunch && runningChats.size === 0) {
+    const { pull } = pendingRelaunch;
+    pendingRelaunch = null;
+    setTimeout(() => relaunchNow(pull), 100);
+  }
+}
+
 // Pull (optional) then ask run-server.sh to relaunch us via the dedicated exit
 // code 42. Responds first, then exits a beat later so the HTTP reply lands.
 function selfUpdate({ pull }, cb) {
   if (!BOOT_HEAD) return cb(new Error('not a git checkout — cannot self-update'));
+  // Turn(s) in flight: don't interrupt them (the whole point of this work).
+  // Remember the request and relaunch when the server next goes idle; the pull
+  // happens at that point so it picks up the newest commit.
+  if (runningChats.size > 0) {
+    pendingRelaunch = { pull: !!pull };
+    return cb(null, { relaunching: true, deferred: true, head: gitRepo(['rev-parse', '--short', 'HEAD']) });
+  }
   if (pull) {
     try { git(REPO_DIR, ['pull', '--ff-only']); }
     catch (e) {
@@ -1393,13 +1663,7 @@ function selfUpdate({ pull }, cb) {
     }
   }
   cb(null, { relaunching: true, head: gitRepo(['rev-parse', '--short', 'HEAD']) });
-  setTimeout(() => {
-    for (const { child, timer } of runningChats.values()) {
-      if (timer) clearTimeout(timer);
-      try { child.kill('SIGTERM'); } catch {}
-    }
-    process.exit(42); // run-server.sh treats 42 as "relaunch now"
-  }, 300);
+  setTimeout(() => relaunchNow(false), 300); // pull (if any) already applied above
 }
 
 // ---------------------------------------------------------------------------
@@ -2714,6 +2978,9 @@ const server = http.createServer((req, res) => {
       needsLogin: lastChatErrorKind.get(id) === 'auth',
       usageLimited: lastChatErrorKind.get(id) === 'usage',
       needsSetup: lastChatErrorKind.get(id) === 'missing',
+      // A turn cut short by a server restart — its progress was saved and it can
+      // be continued; the UI shows this as a gentle notice, not a crash.
+      interrupted: lastChatErrorKind.get(id) === 'interrupted',
       partial: lp ? { text: lp.text, tools: lp.tools, ask: lp.ask || null } : null,
     });
   }
@@ -2780,4 +3047,8 @@ server.listen(PORT, HOST, () => {
   if (bindAttempts) console.log(`Port ${PORT} freed up after ${bindAttempts} retr${bindAttempts > 1 ? 'ies' : 'y'}.`);
   console.log(`ClaudeNav running at http://${HOST}:${PORT}`);
   console.log(`Reading sessions from ${PROJECTS_DIR}`);
+  // Rediscover any turns/queue a previous process left mid-flight, so a restart
+  // is invisible: live turns are reattached, ones that died in the gap are
+  // finalized from their logs. Best-effort — never let it stop the server.
+  try { reconcileOnBoot(); } catch (e) { console.error('[claudenav] reconcile on boot failed:', e && e.message); }
 });

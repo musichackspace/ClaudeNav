@@ -13,9 +13,33 @@ PORT="${PORT:-4317}"
 HOST="127.0.0.1"
 LOG="${CLAUDENAV_LOG:-/tmp/claudenav.log}"
 
-# Probe the cheapest real endpoint. --max-time guards against a hung socket that
-# accepts the connection but never responds; -f makes non-2xx a failure.
-if v=$(curl -fsS --max-time 5 "http://$HOST:$PORT/api/version" 2>/dev/null); then
+# Kickstarting is destructive: it SIGTERMs the running process, killing any
+# in-flight headless turn with no error surfaced to the user. So a single failed
+# probe must NOT trigger a restart — the server is single-threaded and does some
+# synchronous work (ps+lsof liveness, git, reparsing large transcripts), so the
+# event loop can briefly stall past one probe's timeout without being dead.
+# Only restart when EVERY probe in a short burst fails (a genuine hang/crash);
+# ride out a transient stall by retrying first. Tunable via env.
+RETRIES="${CLAUDENAV_WATCHDOG_RETRIES:-3}"      # consecutive failures before restart
+RETRY_GAP="${CLAUDENAV_WATCHDOG_RETRY_GAP:-3}"  # seconds between probes
+MAX_TIME="${CLAUDENAV_WATCHDOG_MAXTIME:-8}"     # per-probe timeout (seconds)
+
+# Probe the cheapest real endpoint, retrying before giving up. --max-time guards
+# against a hung socket that accepts the connection but never responds; -f makes
+# non-2xx a failure. Returns the last good body in $v on success.
+v=""
+attempt=0
+probe_ok=""
+while [ "$attempt" -lt "$RETRIES" ]; do
+  attempt=$(( attempt + 1 ))
+  if v=$(curl -fsS --max-time "$MAX_TIME" "http://$HOST:$PORT/api/version" 2>/dev/null); then
+    probe_ok=1
+    break
+  fi
+  [ "$attempt" -lt "$RETRIES" ] && sleep "$RETRY_GAP"
+done
+
+if [ -n "$probe_ok" ]; then
   # Reachable — but is it stale? A commit on disk that the running process
   # predates shows up as head != bootHead (the UI's manual "relaunch" case).
   # Auto-apply it via the server's own graceful relaunch (/api/update, exit 42)
@@ -32,7 +56,7 @@ if v=$(curl -fsS --max-time 5 "http://$HOST:$PORT/api/version" 2>/dev/null); the
   exit 0
 fi
 
-echo "=== $(date '+%Y-%m-%d %H:%M:%S') watchdog: $HOST:$PORT unreachable — kickstarting $LABEL ===" >> "$LOG"
+echo "=== $(date '+%Y-%m-%d %H:%M:%S') watchdog: $HOST:$PORT unreachable after $RETRIES probes — kickstarting $LABEL ===" >> "$LOG"
 # -k kills any existing (possibly hung) instance first, then (re)starts it.
 # This forces a restart even after run-server.sh's crash cap, which deliberately
 # exits 0 so launchd's KeepAlive won't relaunch on its own.

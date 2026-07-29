@@ -42,7 +42,14 @@ runs `watchdog.sh` every 60s (`CLAUDENAV_WATCHDOG_INTERVAL` to change). It pings
 `/api/version`; if the server is unreachable it `launchctl kickstart -k`s the
 main agent. This covers the two cases `KeepAlive` can't: a **hung** server
 (process alive, not serving) and a **crash-cap give-up** (`run-server.sh` exits
-0, so launchd won't relaunch). It also auto-applies **stale code**: when the
+0, so launchd won't relaunch). Because a kickstart is destructive (it kills the
+running process), the probe **retries before concluding the server is dead** —
+`CLAUDENAV_WATCHDOG_RETRIES` (default 3) probes `CLAUDENAV_WATCHDOG_RETRY_GAP`s
+apart (default 3), each with a `CLAUDENAV_WATCHDOG_MAXTIME`s timeout (default 8),
+and it only restarts when *every* probe fails. This stops a transient
+event-loop stall (a big transcript reparse, a slow `lsof`) from being mistaken
+for a hang and triggering a needless restart — the original single-5s-probe
+behavior was silently killing healthy-but-busy servers. It also auto-applies **stale code**: when the
 reply shows `head != bootHead` (a new commit on disk that the running process
 predates), it POSTs `/api/update {pull:false}` — the server's graceful exit-42
 relaunch — so committing is enough to deploy; no UI click needed. A healthy
@@ -62,7 +69,20 @@ removes both agents.
 - `POST /api/chat {session, text, images, cwd}` — run a headless turn
   (`--resume`, or `--session-id` to create a new one), via
   `--output-format stream-json --verbose` so blocks can be previewed live.
-  Queued one-at-a-time per session; `cwd` is only used when creating. The
+  Queued one-at-a-time per session; `cwd` is only used when creating. **Turns
+  are spawned detached** (own process group, `child.unref()`) with stdout/stderr
+  redirected to per-turn log files under `~/.claude/claudenav-turns-<PORT>/`, and
+  the live preview + auth/usage detection are driven by *tailing those files*
+  (poll, `CLAUDENAV_TAIL_MS`, default 400) rather than reading a pipe. This is
+  the terminal-grade-reliability change: a turn keeps running (and keeps writing
+  its transcript + logs) across a server restart — watchdog kickstart, exit-42
+  update, crash — instead of being SIGTERM'd with it. In-flight turns and the
+  queue are persisted (`claudenav-runs-<PORT>.json` / `claudenav-queue-<PORT>.json`,
+  keyed by port so a second instance can't collide) and rediscovered on the next
+  boot (`reconcileOnBoot`): a turn whose pid is still alive is **reattached**
+  (tail its logs, watch its pid for completion); one that died in the gap is
+  finalized from its logs. The LaunchAgent sets `AbandonProcessGroup` so a
+  `launchctl kickstart -k` doesn't reap the detached turns. The
   `images` array (legacy name) holds attachments as `{data, name}` — `data` is a
   base64 data URL, `name` the original filename. Type is decided by the filename
   extension (browser MIME is unreliable for source/Office files), giving four
@@ -77,8 +97,12 @@ removes both agents.
   built-ins; extraction failures fall back to a placeholder note. Unsupported
   types are rejected client-side with a warning toast.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
-  usageLimited, needsSetup, partial}`. `partial` is the in-flight assistant output
-  (`{text, tools}`, block-level — the CLI doesn't stream tokens) or `null`.
+  usageLimited, needsSetup, interrupted, partial}`. `partial` is the in-flight
+  assistant output (`{text, tools}`, block-level — the CLI doesn't stream tokens)
+  or `null`. `interrupted` is true when a turn was cut short by a server restart
+  (its pid was gone on the next boot before it produced a terminal `result`); the
+  UI shows the server's gentle "progress was saved — send again to continue"
+  message with no scary "Turn error:" prefix (same treatment as `usageLimited`).
   `needsLogin` is true on an auth failure; the UI then adds a "Re-login" button
   to the error toast (opens a terminal via `/api/open {login:true}`).
   `usageLimited` is true when the turn hit a usage/rate limit; the UI shows the
@@ -234,7 +258,13 @@ removes both agents.
   to `/api/sessions` as `usage`, so the 5s poll keeps the header bars current.
 - `POST /api/update {pull}` — `git pull --ff-only` (when `pull`) then relaunch via
   `process.exit(42)`; `run-server.sh` treats 42 as an intentional restart (no
-  crash-cap hit). Powers the header "Update & relaunch" button.
+  crash-cap hit). Powers the header "Update & relaunch" button. **Deferred while
+  a turn is in flight**: if any turn is running it stores the request
+  (`pendingRelaunch`) and returns `{deferred:true}` instead of exiting; the
+  relaunch (and the pull) fires from `maybeRelaunch()` once the server goes idle,
+  so a deploy never interrupts active work. Since turns are detached and
+  reattached on boot anyway, the wait is purely to avoid the brief blank-preview
+  gap, not to protect the turn.
 
 ## Conventions / gotchas
 
@@ -299,6 +329,16 @@ removes both agents.
   transcript only (not the live partial — that raced the poll); a click resumes
   the session with `"<question>"="<answer>"`. Verified end-to-end: resume after a
   mid-question kill returns rc=0 and Claude acts on the pick.
+- **Event-loop discipline — the server is single-threaded, and a stall past the
+  watchdog's probe budget gets it killed.** `/api/sessions` is polled every 5s,
+  so its hot path must stay cheap: liveness (`ps` + one `lsof` per live `claude`)
+  is cached ~4s (`liveTerminals`, `CLAUDENAV_LIVE_TTL_MS`), and `parseSessionFile`
+  parses transcripts **incrementally** — it folds a growing file's newly-appended
+  bytes into a cached accumulator (keyed by mtime+size+offset) instead of
+  re-reading the whole thing every poll (a 13 MB transcript: ~29 ms full vs
+  ~0.4 ms append). Keep new synchronous work off that path; if you must shell
+  out or read big files per-request, cache it. This, plus the watchdog retries,
+  is what stopped the "interrupted, no error message" restart loop.
 
 ## Outstanding / TODO
 

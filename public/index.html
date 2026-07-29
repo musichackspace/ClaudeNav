@@ -1893,10 +1893,11 @@ async function checkChatStatus() {
       clearStreaming();
     }
     if (j.error && !j.running) {
-      if (j.usageLimited) {
-        // Not a crash — the server already phrased it as plain, actionable
-        // guidance (with a reset time when known). Show it as-is, no scary
-        // "Turn error:" prefix, and let it linger so it's readable.
+      if (j.usageLimited || j.interrupted) {
+        // Not a crash — either a usage limit or a turn cut short by a server
+        // restart (its progress was saved). The server already phrased it as
+        // plain, actionable guidance, so show it as-is with no scary "Turn
+        // error:" prefix, and let it linger so it's readable.
         toast(j.error, true, { label: 'Dismiss', fn: () => {} });
       } else if (j.needsSetup) {
         // The `claude` binary couldn't be found/spawned — offer the fix steps

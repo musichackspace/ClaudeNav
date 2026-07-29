@@ -67,6 +67,14 @@ cat > "$PLIST" <<PLISTEOF
     </dict>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Let headless turns outlive a restart. ClaudeNav spawns each `claude`
+         turn detached (its own process group) and redirects its output to a log
+         so it keeps running — and keeps writing its transcript — across a server
+         relaunch, the way a terminal session would; the next boot reattaches to
+         it. Without this, a `launchctl kickstart -k` (the watchdog's restart)
+         would SIGKILL the whole job process group and take the turn with it. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
