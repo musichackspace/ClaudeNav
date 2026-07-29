@@ -1689,7 +1689,37 @@ function sanitizeLeaf(name) {
     .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'session';
 }
 
-// Create a worktree on a fresh branch off HEAD; returns its path + branch.
+// Pick a fresh, canonical commit to branch a new worktree from. Branching off
+// whatever the main checkout's HEAD happens to point at makes every new session
+// inherit a stale state — a leftover feature branch, or a `main` that's behind
+// origin. Prefer the repo's default branch, refreshed from origin when there's
+// a remote, so a new session always starts from clean, recent code. Falls back
+// to local HEAD when there's no remote / no discoverable default branch.
+function worktreeBase(cwd) {
+  const hasRemote = (() => { try { return !!git(cwd, ['remote']); } catch { return false; } })();
+  if (!hasRemote) {
+    // No remote: use the local default branch if it's not the one checked out
+    // here, else HEAD. (Can't check out a branch that's already in use.)
+    return 'HEAD';
+  }
+  // Refresh so origin/<default> is current. Best-effort and bounded — an
+  // offline / slow remote must not wedge session creation; we just fall back
+  // to the last-fetched origin ref (or HEAD).
+  try { execFileSync('git', ['-C', cwd, 'fetch', '--quiet', 'origin'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 }); }
+  catch { /* offline / no such remote — use whatever origin refs we already have */ }
+  // Resolve the default branch: origin/HEAD when set, else probe the usual names.
+  let def = '';
+  try { def = git(cwd, ['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD']); } catch {}
+  if (!def) {
+    for (const cand of ['origin/main', 'origin/master']) {
+      try { git(cwd, ['rev-parse', '--verify', '-q', cand + '^{commit}']); def = cand; break; } catch {}
+    }
+  }
+  return def || 'HEAD';
+}
+
+// Create a worktree on a fresh branch off the repo's up-to-date default branch
+// (see worktreeBase); returns its path + branch.
 function gitWorktreeAdd(cwd, name, cb) {
   if (!knownCwds().has(cwd)) return cb(new Error('unknown working directory'));
   try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') return cb(new Error('not a git repo')); }
@@ -1702,10 +1732,11 @@ function gitWorktreeAdd(cwd, name, cb) {
   const leaf = sanitizeLeaf(name) + '-' + crypto.randomBytes(3).toString('hex');
   const branch = 'session/' + leaf;
   const wtPath = path.join(cwd, '.claude', 'worktrees', leaf);
+  const base = worktreeBase(cwd);
   try {
-    execFileSync('git', ['-C', cwd, 'worktree', 'add', '-b', branch, wtPath, 'HEAD'],
+    execFileSync('git', ['-C', cwd, 'worktree', 'add', '-b', branch, wtPath, base],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    cb(null, { path: wtPath, branch });
+    cb(null, { path: wtPath, branch, base });
   } catch (e) {
     cb(new Error((e.stderr || e.message || 'worktree add failed').toString().trim().slice(0, 300)));
   }
