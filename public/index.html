@@ -1616,7 +1616,7 @@ function renderCompose(p, s) {
     <textarea id="composeBox" placeholder="Message this session… paste or drop a file to attach — images, PDFs, text/source, Office docs (Enter to send, Shift+Enter for newline)"></textarea>
     <div class="row">
       <button id="attachBtn" class="ghost" title="Attach a file (images, PDFs, text/source, Office docs)">📎</button>
-      <input id="fileInput" type="file" accept="image/*,application/pdf,text/*,.docx,.xlsx,.pptx,.md,.csv,.json,.yaml,.yml,.py,.js,.ts,.go,.rs,.java,.c,.h,.cpp,.sh,.sql,.toml,.heic,.heif" multiple hidden>
+      <input id="fileInput" type="file" accept="image/*,application/pdf,text/*,.docx,.xlsx,.pptx,.md,.csv,.json,.yaml,.yml,.py,.js,.ts,.go,.rs,.java,.c,.h,.cpp,.sh,.sql,.toml,.heic,.heif,.zip" multiple hidden>
       ${liveNote}<span id="working" class="hint"></span>
       <button id="stopBtn" class="ghost stop" title="Stop the running turn and clear the queue" hidden>■ Stop</button>
       <button id="sendBtn">Send ▸</button>
@@ -1659,7 +1659,7 @@ function attachKind(f) {
   const ext = extOf(f && f.name), t = (f && f.type) || '';
   if (t.startsWith('image/') || IMAGE_EXTS.includes(ext)) return 'image';
   if (ext === 'pdf' || t === 'application/pdf') return 'pdf';
-  if (OFFICE_EXTS.includes(ext) || TEXT_EXTS.includes(ext) || t.startsWith('text/')) return 'file';
+  if (OFFICE_EXTS.includes(ext) || TEXT_EXTS.includes(ext) || ext === 'zip' || t.startsWith('text/')) return 'file';
   return null;
 }
 

@@ -923,12 +923,12 @@ const TEXT_EXTS = new Set([
 
 function extOf(name) { const m = /\.([A-Za-z0-9]+)$/.exec(name || ''); return m ? m[1].toLowerCase() : ''; }
 
-// image | pdf | file (text/office) | null (unsupported).
+// image | pdf | file (text/office/zip) | null (unsupported).
 function attachKind(name) {
   const ext = extOf(name);
   if (IMAGE_EXTS.has(ext)) return 'image';
   if (ext === 'pdf') return 'pdf';
-  if (OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext)) return 'file';
+  if (OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext) || ext === 'zip') return 'file';
   return null;
 }
 
@@ -947,6 +947,37 @@ function officeToText(fp, ext) {
   for (const mem of members) { try { xml += execFileSync('unzip', ['-p', fp, mem], BUF); } catch {} }
   const nodes = [...xml.matchAll(/<(?:a:)?t\b[^>]*>([\s\S]*?)<\/(?:a:)?t>/g)].map(m => decodeXml(m[1]));
   return nodes.join('\n').trim();
+}
+
+// Extract a readable digest from a .zip so the CLI's Read tool can consume it:
+// a full file listing, then the contents of each text/source member inlined
+// (binary members — images, PDFs, nested archives — are listed but not read).
+// Best-effort and bounded: skips huge members and stops at a total size cap so a
+// pathological archive can't blow up the prompt.
+function zipToText(fp, origName) {
+  const BUF = { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 };
+  let listing = '';
+  try { listing = execFileSync('unzip', ['-Z1', fp], BUF); } catch {}
+  const members = listing.split('\n').map(s => s.trim()).filter(Boolean);
+  const out = [`Archive: ${origName}`, `${members.length} entr${members.length === 1 ? 'y' : 'ies'}:`, ...members.map(m => `  ${m}`), ''];
+  const MEMBER_CAP = 256 * 1024;  // per-file read cap
+  const TOTAL_CAP = 4 * 1024 * 1024; // stop inlining past this
+  let total = 0, inlined = 0, skipped = 0;
+  for (const mem of members) {
+    if (mem.endsWith('/')) continue; // directory entry
+    const kind = attachKind(mem); // reuse text/office/etc. classification
+    const isText = TEXT_EXTS.has(extOf(mem)) || extOf(mem) === '';
+    if (!isText) { skipped++; continue; }
+    if (total >= TOTAL_CAP) { skipped++; continue; }
+    let body = '';
+    try { body = execFileSync('unzip', ['-p', fp, mem], { ...BUF, maxBuffer: MEMBER_CAP + 4096 }); } catch { skipped++; continue; }
+    if (body.length > MEMBER_CAP) body = body.slice(0, MEMBER_CAP) + '\n… (truncated)';
+    total += body.length; inlined++;
+    out.push(`\n===== ${mem} =====\n${body}`);
+    void kind;
+  }
+  out.push(`\n(inlined ${inlined} text file${inlined === 1 ? '' : 's'}; ${skipped} binary/oversized/other member${skipped === 1 ? '' : 's'} listed but not read)`);
+  return out.join('\n').trim();
 }
 
 // Decode a data URL to a file in UPLOADS_DIR, converting as needed. `name` is the
@@ -995,6 +1026,13 @@ function saveAttachment(att) {
       try { text = officeToText(src, ext); } catch {}
       fs.unlinkSync(src);
       return { path: write(`${safe}.txt`, text || `(could not extract text from ${origName})`), kind: 'file' };
+    }
+    if (ext === 'zip') {
+      const src = write(safe, buf);
+      let text = '';
+      try { text = zipToText(src, origName); } catch {}
+      fs.unlinkSync(src);
+      return { path: write(`${safe}.txt`, text || `(could not read archive ${origName})`), kind: 'file' };
     }
     return { path: write(safe, buf), kind };
   } catch { return null; }
