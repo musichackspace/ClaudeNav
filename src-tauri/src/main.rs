@@ -194,6 +194,12 @@ fn main() {
             .title("ClaudeNav")
             .inner_size(1200.0, 820.0)
             .min_inner_size(720.0, 480.0)
+            // Tauri v2 enables the webview's native OS drag-drop handler by
+            // default, which intercepts file drops so they never reach the
+            // page's HTML5 `drop` event — the in-app "drop a file to attach"
+            // silently does nothing. Disable it so the web drag-drop handlers
+            // (see setupDropZone in public/index.html) receive the drop.
+            .disable_drag_drop_handler()
             .build()?;
 
             spawn_reconnect_watcher(app.handle().clone(), url);
