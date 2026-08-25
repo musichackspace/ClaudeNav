@@ -2020,6 +2020,27 @@ function worktreeBase(cwd) {
   return def || 'HEAD';
 }
 
+// Keep our own worktree directory out of the repo's eyes. Session worktrees live
+// at <repo>/.claude/worktrees/<leaf>, which in a repo without a .gitignore for
+// `.claude/` (every wizard-created website) shows up as an untracked change: the
+// project folder then reads as permanently "Draft", a `git add -A` publish
+// commits the worktrees tree into the site, and a fast-forward sync looks unsafe.
+// Written to .git/info/exclude — local and untracked, so we never edit a file the
+// user owns. Idempotent.
+function excludeWorktrees(cwd) {
+  try {
+    let dir = git(cwd, ['rev-parse', '--git-common-dir']);
+    if (!path.isAbsolute(dir)) dir = path.resolve(cwd, dir);
+    const file = path.join(dir, 'info', 'exclude');
+    const line = '.claude/worktrees/';
+    const cur = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    if (cur.split('\n').some(l => l.trim() === line)) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, (cur && !cur.endsWith('\n') ? cur + '\n' : cur) +
+      '# ClaudeNav session worktrees\n' + line + '\n');
+  } catch { /* best-effort — a missing exclude only costs cosmetics */ }
+}
+
 // Create a worktree on a fresh branch off the repo's up-to-date default branch
 // (see worktreeBase); returns its path + branch.
 function gitWorktreeAdd(cwd, name, cb) {
@@ -2031,6 +2052,7 @@ function gitWorktreeAdd(cwd, name, cb) {
   // to a plain session in the folder itself.
   try { git(cwd, ['rev-parse', '--verify', '-q', 'HEAD']); }
   catch { return cb(new Error('no commits yet')); }
+  excludeWorktrees(cwd);
   const leaf = sanitizeLeaf(name) + '-' + crypto.randomBytes(3).toString('hex');
   const branch = 'session/' + leaf;
   const wtPath = path.join(cwd, '.claude', 'worktrees', leaf);
@@ -2294,11 +2316,14 @@ function createSite({ name, parent }, cb) {
 // Live-site status for an existing repo. `GET repos/{nwo}/pages` 404s when Pages
 // is off (→ enabled:false); when on, `.html_url` is authoritative (it handles
 // custom domains and user/org root sites, unlike the deterministic guess).
+// `.source.branch` is the branch GitHub actually serves — publishing has to land
+// there or the push is a no-op as far as the live site is concerned.
 function pagesInfo(nwo) {
   try {
-    const j = JSON.parse(gh(['api', `repos/${nwo}/pages`, '--jq', '{url: .html_url}']));
-    return { enabled: true, url: j.url || null };
-  } catch { return { enabled: false, url: null }; }
+    const j = JSON.parse(gh(['api', `repos/${nwo}/pages`,
+      '--jq', '{url: .html_url, branch: .source.branch}']));
+    return { enabled: true, url: j.url || null, branch: j.branch || null };
+  } catch { return { enabled: false, url: null, branch: null }; }
 }
 
 // List the signed-in user's own repos, newest activity first — the picker for
@@ -2422,11 +2447,11 @@ const pagesCache = new Map(); // nwo -> { at, info }
 function pagesState(nwo) {
   const c = pagesCache.get(nwo);
   if (c && Date.now() - c.at < 30000) return c.info;
-  let info = { pagesEnabled: false, pagesUrl: null, buildStatus: null, builtCommit: null, builtAt: null };
+  let info = { pagesEnabled: false, pagesUrl: null, pagesBranch: null, buildStatus: null, builtCommit: null, builtAt: null };
   try {
     const pi = pagesInfo(nwo);
     if (pi.enabled) {
-      info = { pagesEnabled: true, pagesUrl: pi.url, buildStatus: null, builtCommit: null, builtAt: null };
+      info = { pagesEnabled: true, pagesUrl: pi.url, pagesBranch: pi.branch, buildStatus: null, builtCommit: null, builtAt: null };
       try {
         const b = JSON.parse(gh(['api', `repos/${nwo}/pages/builds/latest`,
           '--jq', '{status: .status, commit: .commit, updated_at: .updated_at}']));
@@ -2441,6 +2466,36 @@ function pagesState(nwo) {
 }
 function invalidatePages(nwo) { if (nwo) pagesCache.delete(nwo); }
 
+// True when the git command succeeds. For predicates like `merge-base
+// --is-ancestor`, where the answer is the exit code and stdout is empty (so
+// gitTry's "did it return anything" can't distinguish yes from no).
+function gitOk(cwd, args) { try { git(cwd, args); return true; } catch { return false; } }
+
+// The project's own checkout behind a (possibly linked) session worktree.
+// `git worktree list` always names the main working tree first.
+function mainCheckout(cwd) {
+  const here = path.resolve(cwd);
+  const list = gitTry(cwd, ['worktree', 'list', '--porcelain']);
+  const first = (list.split('\n').find(l => l.startsWith('worktree ')) || '').slice('worktree '.length);
+  const main = first ? path.resolve(first) : here;
+  return { main, isWorktree: main !== here };
+}
+
+// The branch a publish must land on for the change to actually go live: the
+// branch GitHub Pages serves, else the repo's default branch. Session worktrees
+// sit on their own `session/<leaf>` branch, which Pages never builds — so
+// "which branch am I on" is the wrong question for publishing, and asking this
+// instead is what lets a worktree session ship without a manual merge.
+function publishBranch(cwd, pagesBranch) {
+  if (pagesBranch) return pagesBranch;
+  const head = gitTry(cwd, ['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD']);
+  if (head.startsWith('origin/')) return head.slice('origin/'.length);
+  for (const cand of ['main', 'master']) {
+    if (gitOk(cwd, ['rev-parse', '--verify', '-q', `refs/remotes/origin/${cand}`])) return cand;
+  }
+  return gitTry(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], 'main');
+}
+
 function repoNwo(cwd) {
   const url = gitTry(cwd, ['remote', 'get-url', 'origin']);
   const m = url.match(/[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
@@ -2452,23 +2507,36 @@ function siteStatus(cwd) {
   if (!abs || !fs.existsSync(abs)) return { state: 'unknown', label: 'Unknown' };
   if (gitTry(abs, ['rev-parse', '--is-inside-work-tree']) !== 'true') return { state: 'nonrepo', label: 'Not a website project' };
 
-  const porcelain = gitTry(abs, ['status', '--porcelain']);
-  const dirty = !!porcelain;
-  const changeCount = dirty ? porcelain.split('\n').filter(Boolean).length : 0;
+  // Our own session-worktree directory is not the user's change. excludeWorktrees
+  // keeps it out of `status` for repos we've touched; filter it here too so a repo
+  // that predates that (or was cloned fresh) doesn't read as permanently "Draft".
+  const changes = gitTry(abs, ['status', '--porcelain']).split('\n')
+    .filter(Boolean).filter(l => !/\.claude\/worktrees\//.test(l));
+  const dirty = changes.length > 0;
+  const changeCount = changes.length;
 
   const r = repoNwo(abs);
   if (!r) return { state: 'local', label: 'Saved on this computer only', dirty, changeCount, hasRemote: false };
 
-  const hasUpstream = !!gitTry(abs, ['rev-parse', '--abbrev-ref', '@{u}']);
-  const ahead = hasUpstream ? (parseInt(gitTry(abs, ['rev-list', '--count', '@{u}..HEAD'], '0'), 10) || 0) : 0;
-  const remoteHead = hasUpstream ? gitTry(abs, ['rev-parse', '@{u}']) : '';
-
   const ps = pagesState(r.nwo);
+  // Measure "is my work online" against the branch GitHub serves — NOT against
+  // this checkout's own upstream. A session worktree pushed to its own
+  // `session/<leaf>` branch has a perfectly up-to-date @{u} while the live site
+  // shows none of it; comparing to origin/<publish branch> tells the truth for
+  // worktree and main-checkout sessions alike.
+  const branch = publishBranch(abs, ps.pagesBranch);
+  const remoteRef = `origin/${branch}`;
+  const hasUpstream = gitOk(abs, ['rev-parse', '--verify', '-q', `refs/remotes/${remoteRef}`]);
+  const ahead = hasUpstream ? (parseInt(gitTry(abs, ['rev-list', '--count', `${remoteRef}..HEAD`], '0'), 10) || 0) : 0;
+  const remoteHead = hasUpstream ? gitTry(abs, ['rev-parse', remoteRef]) : '';
+
   const pagesUrl = ps.pagesUrl || `https://${r.owner}.github.io/${r.name}/`;
   // "Is this a website?" — Pages already on, or created/imported via the wizard.
   // Ordinary code repos (GitHub remote but neither) get state 'repo' and no pill.
-  const isSite = ps.pagesEnabled || knownSites.has(abs);
-  const base = { isSite, dirty, changeCount, ahead, hasRemote: true, nwo: r.nwo,
+  // Check the project folder too, so a session worktree of a wizard site (whose
+  // registry entry names the project, not the worktree) still counts as one.
+  const isSite = ps.pagesEnabled || knownSites.has(abs) || knownSites.has(mainCheckout(abs).main);
+  const base = { isSite, dirty, changeCount, ahead, hasRemote: true, nwo: r.nwo, publishBranch: branch,
     repoUrl: `https://github.com/${r.nwo}`, pagesEnabled: ps.pagesEnabled, pagesUrl, buildStatus: ps.buildStatus };
   if (!isSite) return { state: 'repo', label: 'Code project', ...base };
 
@@ -2493,12 +2561,9 @@ function siteStatus(cwd) {
 // commit), then push (setting upstream on the first push). Non-devs never see a
 // commit/push distinction — this is the whole ship-it action. Returns the fresh
 // status so the pill flips to "Publishing…" immediately.
-function publishSite({ cwd, message }, cb) {
-  const abs = underHome(cwd);
-  if (!abs) return cb(new Error('that folder is outside your home directory'));
-  if (gitTry(abs, ['rev-parse', '--is-inside-work-tree']) !== 'true') return cb(new Error('not a website project'));
-  const r = repoNwo(abs);
-  if (!r) return cb(new Error('this site has no GitHub connection yet'));
+// The pre-Pages behavior: commit anything pending and push the branch we're on.
+// Used for a GitHub repo that isn't a website (see publishSite).
+function pushCurrentBranch(abs, message, r, cb) {
   try {
     if (gitTry(abs, ['status', '--porcelain'])) {
       git(abs, ['add', '-A']);
@@ -2511,6 +2576,86 @@ function publishSite({ cwd, message }, cb) {
     execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     return cb(new Error((e.stderr || e.stdout || e.message || 'publish failed').toString().trim().slice(0, 300)));
+  }
+  invalidatePages(r.nwo);
+  cb(null, siteStatus(abs));
+}
+
+function publishSite({ cwd, message }, cb) {
+  const abs = underHome(cwd);
+  if (!abs) return cb(new Error('that folder is outside your home directory'));
+  if (gitTry(abs, ['rev-parse', '--is-inside-work-tree']) !== 'true') return cb(new Error('not a website project'));
+  const r = repoNwo(abs);
+  if (!r) return cb(new Error('this site has no GitHub connection yet'));
+  const ps = pagesState(r.nwo);
+  const { main, isWorktree } = mainCheckout(abs);
+  const isSite = ps.pagesEnabled || knownSites.has(abs) || knownSites.has(main);
+  // Not a website — publish means nothing more than "push this branch". Keep the
+  // plain behavior; redirecting a code repo's branch onto main would be wrong.
+  if (!isSite) return pushCurrentBranch(abs, message, r, cb);
+  const branch = publishBranch(abs, ps.pagesBranch);
+  excludeWorktrees(abs); // before any `git add -A`, so we never commit our own worktrees
+  try {
+    if (gitTry(abs, ['status', '--porcelain'])) {
+      git(abs, ['add', '-A']);
+      execFileSync('git', ['-C', abs, 'commit', '-m', (message || '').trim() || 'Update website (ClaudeNav)'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    }
+    // Refresh the published branch first: it may have moved since this session
+    // was created (another session shipped). Best-effort and bounded — being
+    // offline must not wedge publishing; the push below will fail honestly.
+    try {
+      execFileSync('git', ['-C', abs, 'fetch', '--quiet', 'origin', branch],
+        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
+    } catch { /* offline / branch doesn't exist yet — fall through */ }
+    const remoteRef = `refs/remotes/origin/${branch}`;
+    const haveRemote = gitOk(abs, ['rev-parse', '--verify', '-q', remoteRef]);
+    // Replay this session's commits on top of what's live, so the user never has
+    // to rebase by hand to get their change online. A no-op when this session is
+    // already current (the common case — worktrees branch off a fresh origin).
+    if (haveRemote && !gitOk(abs, ['merge-base', '--is-ancestor', `origin/${branch}`, 'HEAD'])) {
+      try {
+        execFileSync('git', ['-C', abs, 'rebase', `origin/${branch}`],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) {
+        // Name the clashing files while the rebase is still in progress — that
+        // list is the one thing that makes this resolvable without git knowledge.
+        const files = gitTry(abs, ['diff', '--name-only', '--diff-filter=U'])
+          .split('\n').filter(Boolean).slice(0, 3).join(', ');
+        try { git(abs, ['rebase', '--abort']); } catch {}
+        return cb(new Error('these changes clash with newer edits that are already online' +
+          (files ? ` (${files})` : '') + ' — ask Claude in this session to merge them, then publish again'));
+      }
+    }
+    // Land it on the branch GitHub serves, whatever branch this session is on.
+    // Pushing HEAD by ref (not the current branch name) is the whole fix: a
+    // session worktree ships to the live branch instead of to a `session/…`
+    // branch that Pages never builds.
+    execFileSync('git', ['-C', abs, 'push', 'origin', `HEAD:refs/heads/${branch}`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!isWorktree) { try { git(abs, ['branch', `--set-upstream-to=origin/${branch}`]); } catch {} }
+  } catch (e) {
+    return cb(new Error((e.stderr || e.stdout || e.message || 'publish failed').toString().trim().slice(0, 300)));
+  }
+  // Keep the project's own checkout current, so the NEXT new session branches
+  // off what's live rather than off the pre-publish state. Without this the
+  // staleness comes straight back: worktreeBase() branches off origin/<default>,
+  // which is fine, but a plain session in the project folder would still see old
+  // files. Fast-forward only — never touch a dirty or diverged checkout.
+  // `-uno`: untracked files don't block a fast-forward (git refuses on its own if
+  // one would be clobbered), and before excludeWorktrees ran they always include
+  // our own .claude/worktrees/ — which used to make this sync silently never fire.
+  if (isWorktree && !gitTry(main, ['status', '--porcelain', '-uno'])) {
+    try {
+      if (gitTry(main, ['rev-parse', '--abbrev-ref', 'HEAD']) === branch) {
+        execFileSync('git', ['-C', main, 'merge', '--ff-only', `origin/${branch}`],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      } else {
+        // Not checked out here, so the ref can be updated directly.
+        execFileSync('git', ['-C', main, 'fetch', '--quiet', 'origin', `${branch}:${branch}`],
+          { stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 });
+      }
+    } catch { /* diverged or busy — the live site is published either way */ }
   }
   invalidatePages(r.nwo); // force a fresh Pages read on the next status poll
   cb(null, siteStatus(abs));
@@ -2526,7 +2671,11 @@ function gitWorktreeMerge(wtPath, cb) {
     const main = (list.split('\n').find(l => l.startsWith('worktree ')) || '').slice('worktree '.length);
     if (!main) return cb(new Error('could not locate main worktree'));
     if (path.resolve(main) === path.resolve(wtPath)) return cb(new Error('this is the main worktree'));
-    if (git(main, ['status', '--porcelain'])) {
+    // `-uno` for the same reason as in publishSite: our own .claude/worktrees/ is
+    // untracked in a repo that doesn't ignore it, and counting that as "the user
+    // has uncommitted changes" made merge-back refuse on every such repo.
+    excludeWorktrees(main);
+    if (git(main, ['status', '--porcelain', '-uno'])) {
       return cb(new Error('main checkout has uncommitted changes — commit or stash them first'));
     }
     // Commit anything pending in the session worktree, then merge into main.

@@ -218,11 +218,23 @@ removes both agents.
   pagesEnabled, pagesUrl, buildStatus`. Drives the chat-header **Publish bar**
   and the compact per-row **pill** (both reuse the `.vbadge` colour palette).
 - `POST /api/publish {cwd, message?}` — the one-button ship-it: `git add -A` +
-  commit (only if dirty) + push (`-u origin <branch>` on the first push).
-  `$HOME`-bounded + must be a git repo with a GitHub remote. Invalidates the
-  Pages cache and returns the fresh `siteStatus()` so the pill flips to
-  `publishing` at once (then to `live` on the next poll once Pages rebuilds).
-  For Pages sites, push *is* deploy — no separate deploy step.
+  commit (only if dirty) + push. `$HOME`-bounded + must be a git repo with a
+  GitHub remote. Invalidates the Pages cache and returns the fresh `siteStatus()`
+  so the pill flips to `publishing` at once (then to `live` on the next poll once
+  Pages rebuilds). For Pages sites, push *is* deploy — no separate deploy step.
+  **It pushes `HEAD` to the branch GitHub serves** (`publishBranch()`: the Pages
+  source branch, else the default branch), not to the branch the session happens
+  to be on. That's what makes a **session worktree** a first-class way to work on
+  a website: a worktree sits on `session/<leaf>`, which Pages never builds, so the
+  old "push the current branch" landed nothing live, left the pill stuck at
+  `publishing…` forever, and — because `main` never moved — meant the *next* new
+  session branched off pre-change code and had to redo/rebase the work. If the
+  published branch moved since the session was created, publish **rebases onto it
+  first** (a conflict aborts cleanly and returns an error naming the clashing
+  files, work intact — nothing is force-pushed). After a successful push it
+  fast-forwards the project's own checkout (`-uno`, ff-only, never a dirty or
+  diverged tree) so plain sessions in the project folder are current too. A repo
+  that isn't a site keeps the old push-my-own-branch behavior (`pushCurrentBranch`).
 - `GET /api/housekeeping` — per-repo wrap verdict (busy/dirty/unpushed/clean).
 - `POST /api/assess {session}` — AI "is it safe to wrap?" (adds a turn).
 - `POST /api/handover {session}` — for a context-heavy session: have it write a
@@ -311,6 +323,19 @@ removes both agents.
   zero were actual limits). This precision is the whole ballgame: earlier
   versions scanned the raw stream and cried wolf on any turn that merely
   *discussed* limits or auth.
+- **Session worktrees must be invisible to git.** They live at
+  `<repo>/.claude/worktrees/<leaf>`, so in any repo that doesn't ignore `.claude/`
+  (ClaudeNav's own does — every wizard-created website does *not*) they show up as
+  an untracked change. That one stray `?? .claude/` entry made the project folder
+  read as permanently `draft`, made `gitWorktreeMerge` refuse with "main checkout
+  has uncommitted changes" on every such repo, silently skipped publish's
+  fast-forward sync, and would have let a `git add -A` commit the whole worktrees
+  tree (including sessions' files) into the live site. Three defenses, keep all
+  three: `excludeWorktrees()` writes `.claude/worktrees/` to `.git/info/exclude`
+  (local, never touches a file the user owns) on worktree-add / publish / merge;
+  `siteStatus` filters such paths out of `status --porcelain`; and the
+  "is the tree clean enough" guards use `--porcelain -uno` (untracked files don't
+  block a fast-forward — git refuses on its own if one would be clobbered).
 - The Markdown renderer uses **space-delimited** placeholders (` CB0 `, ` IMG… `);
   an earlier edit corrupted these to null bytes and made the file read as binary —
   keep them spaces.
