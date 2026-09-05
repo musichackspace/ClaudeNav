@@ -5,6 +5,7 @@
   "bin": { "claudenav": "server.js" },
   "scripts": {
     "start": "node server.js",
+    "test": "node --test \"test/*.test.js\"",
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",

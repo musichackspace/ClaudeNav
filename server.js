@@ -18,6 +18,9 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { execFile, execFileSync, spawn } = require('child_process');
+const {
+  classifyAuthFailure, classifyAuthStderr, transcriptErrorKind,
+} = require('./auth-classify');
 
 const PORT = Number(process.env.PORT) || 4317;
 const HOST = '127.0.0.1';
@@ -783,6 +786,13 @@ function parseTranscript(filePath) {
       if (text.trim() || tools.length) {
         const msg = { role: 'assistant', text: text.trim(), tools, ts: o.timestamp || null };
         if (ask) msg.ask = ask;
+        // Some "assistant" records are the CLI reporting its own failure, not
+        // the model speaking — an expired login writes "Failed to authenticate:
+        // OAuth session expired and could not be refreshed" here. Flag them so
+        // the chat renders a failure notice instead of putting words in
+        // Claude's mouth (which is what let a dead session look alive).
+        const ek = transcriptErrorKind(o);
+        if (ek) { msg.errorKind = ek; msg.isError = true; }
         messages.push(msg);
       }
     }
@@ -1146,8 +1156,20 @@ function saveAttachment(att) {
 // the on-disk transcript never has two of *our* writers at once. (A terminal
 // can still write independently; each browser turn re-reads the latest file, so
 // it always continues from the newest state.)
+// Refused because the login is dead. Carries a flag so the route can tell the
+// UI this isn't an ordinary send failure.
+function authBlockedError() {
+  const e = new Error(AUTH_FAILED_MSG);
+  e.authFailed = true;
+  return e;
+}
+
 function chatTurn(sessionId, text, images, newCwd, cb) {
   if (!/^[\w-]+$/.test(sessionId || '')) return cb(new Error('bad session id'));
+  // Hard gate: a "continue" into a dead session must never reach the CLI. The
+  // composer is disabled in the UI, but the API is the real boundary — a stale
+  // tab, a queued retry or a direct POST would otherwise sail straight through.
+  if (authState.state === AUTH_FAILED) return cb(authBlockedError());
   const attachments = (Array.isArray(images) ? images : []).map(saveAttachment).filter(Boolean);
   if ((!text || !text.trim()) && !attachments.length) return cb(new Error('empty message'));
 
@@ -1216,6 +1238,30 @@ function ingestStreamLine(sessionId, line) {
   lp.updatedAt = Date.now();
 }
 
+// Enter AUTH_FAILED the moment a turn reports a dead login: trip the app-wide
+// state, stop this turn (the CLI would otherwise keep retrying a 401 it can
+// never satisfy), and drop every queued turn across all sessions — each one
+// would fail identically in milliseconds and bury the real problem under a pile
+// of identical errors. NOT marked `killed`, so the failure is still reported.
+function stopForAuth(sessionId, hit) {
+  setAuthFailed(hit && hit.reason, hit && hit.message);
+  const entry = runningChats.get(sessionId);
+  if (entry && !entry.killed) killEntry(entry);
+  dropAllQueued();
+}
+
+// Clear every session's pending turns. Returns how many were dropped.
+function dropAllQueued() {
+  let dropped = 0;
+  for (const [id, q] of chatQueues) {
+    if (!q || !q.length) continue;
+    dropped += q.length;
+    chatQueues.set(id, []);
+  }
+  if (dropped) persistQueue();
+  return dropped;
+}
+
 // Stop a running turn the moment it asks a question (see ingestStreamLine).
 // SIGTERM (not cancel) so finalizeTurn doesn't log it as an error and Claude
 // Code flushes the question to the transcript; the UI renders it from there.
@@ -1227,13 +1273,12 @@ function pauseForQuestion(sessionId) {
   killEntry(entry);             // a spawned turn finalizes via 'exit'; a reattached one via tick
 }
 
-// Auth failures don't crash the CLI cleanly — they surface as API 401 text in
-// the stream (and sometimes exit 0 with the failure written to the transcript).
-// Match those so the UI can say "re-login" instead of a bare exit code. Only
-// matched against an error result's message / stderr (see errorSignalText) so a
-// turn that merely *quotes* "/login" in its output doesn't false-flag.
-const AUTH_ERR_RE = /API Error: 401|invalid authentication|invalid api key|authentication_error|OAuth token (?:has )?(?:expired|been revoked)|please run \/login/i;
-const AUTH_ERR_MSG = 'Claude CLI authentication failed (401) — open a terminal, run `claude`, then `/login` to re-authenticate, and retry';
+// Auth failures don't crash the CLI cleanly. A recoverable-looking one surfaces
+// as 401 text; the *terminal* one (an OAuth session that can no longer be
+// refreshed) exits 0 and hands back its failure as a synthetic assistant
+// message, which is why it used to render as ordinary Claude prose. Detection
+// lives in auth-classify.js — it keys off the CLI's own error carriers rather
+// than scanning text, because assistant prose quotes these phrases constantly.
 
 // Usage/rate limits are the other "not your fault, and a bare exit code is
 // useless" failure. The CLI reports them as a 429 or a "usage limit reached"
@@ -1301,7 +1346,8 @@ function mkEntry(sessionId, base) {
   return {
     startedAt: Date.now(), killed: false, finalizing: false, reattached: false,
     outOff: 0, errOff: 0,           // bytes of each log already folded
-    sawAuth: false, sawUsage: false, usageErrLine: '', stderrTail: '',
+    sawAuth: false, authReason: null, authDetail: null,
+    sawUsage: false, usageErrLine: '', stderrTail: '',
     sawResult: false, sawErrResult: false,
     ...base,
   };
@@ -1330,9 +1376,17 @@ function pumpLogs(sessionId, flush) {
           // Auth/usage phrases appear constantly in normal output — match only
           // an error result's own message (see errorSignalText), never raw text.
           const sig = errorSignalText(line);
-          if (sig) {
-            if (!e.sawAuth && AUTH_ERR_RE.test(sig)) e.sawAuth = true;
-            if (!e.sawUsage && USAGE_ERR_RE.test(sig)) { e.sawUsage = true; e.usageErrLine = sig; }
+          if (sig && !e.sawUsage && USAGE_ERR_RE.test(sig)) { e.sawUsage = true; e.usageErrLine = sig; }
+          // Auth is classified structurally (see auth-classify.js) rather than
+          // by scanning error text: the terminal "OAuth session expired" failure
+          // arrives on a *synthetic assistant* record with exit 0, which
+          // errorSignalText deliberately never surfaces.
+          if (!e.sawAuth) {
+            const hit = classifyAuthFailure(line);
+            if (hit) {
+              e.sawAuth = true; e.authReason = hit.reason; e.authDetail = hit.message;
+              stopForAuth(sessionId, hit);
+            }
           }
           // A terminal `result` line means the turn actually finished — that's
           // how we tell "done" from "interrupted" when reattaching to a pid.
@@ -1349,7 +1403,10 @@ function pumpLogs(sessionId, flush) {
       const chunk = readRange(e.errFile, e.errOff, size);
       e.errOff += chunk.length;
       e.stderrTail = (e.stderrTail + chunk.toString('utf8')).slice(-2000);
-      if (!e.sawAuth && AUTH_ERR_RE.test(e.stderrTail)) e.sawAuth = true;
+      if (!e.sawAuth) {
+        const hit = classifyAuthStderr(e.stderrTail);
+        if (hit) { e.sawAuth = true; e.authReason = hit.reason; e.authDetail = hit.message; }
+      }
       if (!e.sawUsage && USAGE_ERR_RE.test(e.stderrTail)) { e.sawUsage = true; e.usageErrLine = e.stderrTail; }
     }
   } catch { /* ignore */ }
@@ -1385,12 +1442,26 @@ function finalizeTurn(sessionId, err, opts = {}) {
   // a turn that finished cleanly just before we noticed the pid is gone is done,
   // not interrupted.
   const interrupted = !!opts.interrupted && !e.sawResult;
+
+  // Auth is app-wide: one dead login breaks every session, so a failure here
+  // trips the global AUTH_FAILED state (which blocks further sends and raises
+  // the banner) rather than being recorded only against this session. The
+  // converse matters just as much — a turn that reached the model is live proof
+  // the login works, so it clears a stale banner without the user doing
+  // anything. Only a turn that actually produced a result counts as proof; a
+  // cancelled or interrupted one proves nothing.
+  if (e.sawAuth) {
+    setAuthFailed(e.authReason || 'authentication_failed', e.authDetail);
+  } else if (e.sawResult && !e.sawErrResult && !interrupted) {
+    setAuthOk('turn');
+  }
+
   if (!e.killed && (err || e.sawAuth || e.sawUsage || interrupted)) {
     // Precedence: auth (401) > usage (429/limit) > missing binary > interrupted
     // > generic. Auth/usage surface even on exit 0, so they win over a code.
     let msg, kind = null;
     const spawnFailed = err && (err.code === 'ENOENT' || err.code === 'EINVAL');
-    if (e.sawAuth) { msg = AUTH_ERR_MSG; kind = 'auth'; }
+    if (e.sawAuth) { msg = AUTH_FAILED_MSG; kind = 'auth'; }
     else if (e.sawUsage) { msg = usageErrorMessage(e.usageErrLine); kind = 'usage'; }
     else if (spawnFailed) { msg = MISSING_BIN_MSG; kind = 'missing'; }
     else if (interrupted) { msg = INTERRUPTED_MSG; kind = 'interrupted'; }
@@ -1467,6 +1538,14 @@ function drainQueue(sessionId) {
   if (runningChats.has(sessionId)) return;
   const q = chatQueues.get(sessionId);
   if (!q || !q.length) return;
+  // Don't spawn into a dead login — every turn would fail identically. Anything
+  // already queued when auth died is dropped rather than left to pile up.
+  if (authState.state === AUTH_FAILED) {
+    dropAllQueued();
+    lastChatError.set(sessionId, AUTH_FAILED_MSG);
+    lastChatErrorKind.set(sessionId, 'auth');
+    return;
+  }
   const { text, cwd } = q.shift();
   persistQueue();
   lastChatError.delete(sessionId);
@@ -1671,24 +1750,235 @@ function selfUpdate({ pull }, cb) {
 // Same source the CLI uses: GET /api/oauth/usage with the stored OAuth token.
 // ---------------------------------------------------------------------------
 
-// The OAuth access token lives in the macOS Keychain (Claude Code-credentials)
-// or, on other platforms, in ~/.claude/.credentials.json.
-function readOAuthToken() {
+// The OAuth credentials live in ~/.claude/.credentials.json or, on macOS, the
+// Keychain (Claude Code-credentials). Cached briefly: reading the Keychain
+// shells out to `security`, and /api/sessions — which carries auth status — is
+// polled every 5s (see the event-loop discipline note in CLAUDE.md).
+const CREDS_TTL = 15 * 1000;
+let credsCache = { at: 0, data: null };
+function readCredentials(force) {
+  const now = Date.now();
+  if (!force && credsCache.at && now - credsCache.at < CREDS_TTL) return credsCache.data;
+  let o = null, source = null;
   try {
-    const raw = fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8');
-    const tok = JSON.parse(raw)?.claudeAiOauth?.accessToken;
-    if (tok) return tok;
+    o = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'))?.claudeAiOauth;
+    if (o) source = 'file';
   } catch {}
-  if (process.platform === 'darwin') {
+  if (!o && process.platform === 'darwin') {
     try {
       const raw = execFileSync('security',
         ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
         { encoding: 'utf8' });
-      const tok = JSON.parse(raw)?.claudeAiOauth?.accessToken;
-      if (tok) return tok;
+      o = JSON.parse(raw)?.claudeAiOauth;
+      if (o) source = 'keychain';
     } catch {}
   }
+  const data = o ? {
+    accessToken: o.accessToken || null,
+    expiresAt: Number(o.expiresAt) || null,
+    refreshTokenExpiresAt: Number(o.refreshTokenExpiresAt) || null,
+    hasRefreshToken: !!o.refreshToken,
+    subscriptionType: o.subscriptionType || null,
+    source,
+  } : null;
+  credsCache = { at: now, data };
+  return data;
+}
+
+function readOAuthToken() {
+  const c = readCredentials();
+  return (c && c.accessToken) || null;
+}
+
+// ---------------------------------------------------------------------------
+// AUTH_FAILED — an app-wide state, not a per-session one.
+//
+// One expired login breaks every session identically, and a headless `-p` spawn
+// can never recover it (re-auth is an interactive browser flow). So auth status
+// is tracked once, surfaced once, and — while it's failed — sends are refused
+// *before* they reach the CLI, rather than each session discovering the same
+// dead end on its own in a few milliseconds.
+// ---------------------------------------------------------------------------
+
+const AUTH_OK = 'ok', AUTH_FAILED = 'AUTH_FAILED', AUTH_UNKNOWN = 'unknown';
+const AUTH_FAILED_MSG = 'Your Claude Code login has expired. ClaudeNav can’t re-authenticate on '
+  + 'its own — signing in is an interactive browser flow — so open a terminal, run `claude`, and '
+  + 'finish `/login` there. This affects every session, not just this one.';
+
+let authState = {
+  state: AUTH_UNKNOWN,
+  reason: null,        // e.g. 'authentication_failed', 'session-expired', 'no-credentials'
+  detail: null,        // the CLI's own wording, when we have it
+  at: 0,               // when the state was last established
+  checkedAt: 0,        // when a preflight last ran
+  checking: false,
+  probe: null,         // 'credentials' | 'cli' — how the last check was made
+};
+
+// A stale token in the environment silently beats fresh Keychain credentials —
+// and survives re-login, so the banner would never clear. This bites when the
+// app is launched from Finder (or by launchd), which inherits a minimal
+// environment rather than the user's login shell: whatever was exported when
+// the LaunchAgent's plist was written is what the CLI sees, forever.
+const ENV_TOKEN_VARS = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+function envTokenOverride() {
+  for (const name of ENV_TOKEN_VARS) {
+    const v = process.env[name];
+    if (!v || !v.trim()) continue;
+    const creds = readCredentials();
+    // Only a *different* value is a problem; a token matching the stored one is
+    // just a mirror of the same login.
+    const shadows = !!(creds && creds.accessToken && creds.accessToken !== v.trim());
+    return {
+      name,
+      shadows,
+      note: `${name} is set in this process's environment and overrides your stored credentials.`
+        + (shadows
+          ? ' It does not match the login in your Keychain, so re-running `/login` will NOT fix auth'
+            + ' until it is unset — check the LaunchAgent plist / how the app was launched.'
+          : ''),
+    };
+  }
   return null;
+}
+
+function setAuthFailed(reason, detail) {
+  const changed = authState.state !== AUTH_FAILED;
+  authState = {
+    ...authState,
+    state: AUTH_FAILED, reason: reason || 'authentication_failed',
+    detail: detail || null, at: Date.now(),
+  };
+  if (changed) console.error('[claudenav] AUTH_FAILED:', reason, '-', detail || '(no detail)');
+  return changed;
+}
+
+// Any evidence the login works again clears the state — a successful turn, or a
+// passing preflight. That's what lets the banner dismiss itself after re-login.
+function setAuthOk(probe) {
+  const changed = authState.state !== AUTH_OK;
+  authState = {
+    ...authState,
+    state: AUTH_OK, reason: null, detail: null, at: Date.now(),
+    checkedAt: Date.now(), probe: probe || authState.probe,
+  };
+  if (changed) console.log('[claudenav] auth OK');
+  return changed;
+}
+
+// The cheap half of the preflight: decide from the stored credentials alone.
+// Returns null when the credentials can't settle it (and a CLI probe is worth
+// running). Note that an expired *access* token is fine — the CLI refreshes it.
+// The terminal condition is a dead *refresh* token, which is precisely the
+// "OAuth session expired and could not be refreshed" failure.
+function preflightCredentials() {
+  const env = envTokenOverride();
+  const creds = readCredentials(true);
+  if (!creds || !creds.accessToken) {
+    // An env token is a legitimate way to authenticate with no stored creds —
+    // we can't judge it from here, so let the CLI probe decide.
+    if (env) return null;
+    return { ok: false, reason: 'no-credentials', detail: 'No stored Claude Code credentials were found.' };
+  }
+  // An env token that doesn't match the stored login is what the CLI will
+  // actually use, so the stored credentials say nothing about whether auth
+  // works — only a real probe can tell. This is the Finder/launchd case: the
+  // app inherits a minimal environment holding whatever token was exported when
+  // the LaunchAgent was installed, and it silently outranks the Keychain.
+  if (env && env.shadows) return null;
+  const now = Date.now();
+  if (creds.refreshTokenExpiresAt && creds.refreshTokenExpiresAt < now) {
+    return {
+      ok: false, reason: 'session-expired',
+      detail: 'OAuth session expired and could not be refreshed.',
+    };
+  }
+  if (creds.expiresAt && creds.expiresAt < now && !creds.hasRefreshToken) {
+    return { ok: false, reason: 'token-expired', detail: 'OAuth token has expired and there is no refresh token.' };
+  }
+  return { ok: true, reason: null, detail: null };
+}
+
+// The thorough half: actually ask the CLI. Costs a (tiny) turn, so it only runs
+// when the credential check is inconclusive or when explicitly forced.
+const AUTH_PROBE_TIMEOUT_MS = Number(process.env.CLAUDENAV_AUTH_PROBE_MS) || 25000;
+function preflightCli(cb) {
+  if (!CLAUDE_BIN_OK) return cb(null, null);  // a missing binary is a setup problem, not an auth one
+  let out = '', err = '', done = false;
+  const finish = (verdict) => { if (!done) { done = true; cb(null, verdict); } };
+  let child;
+  try {
+    child = spawn(CLAUDE_BIN, ['-p', 'ok', '--max-turns', '1', '--output-format', 'stream-json', '--verbose'], {
+      cwd: os.homedir(), stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch { return cb(null, null); }
+  const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish(null); }, AUTH_PROBE_TIMEOUT_MS);
+  child.stdout.on('data', c => { out += c; if (out.length > 200000) out = out.slice(-200000); });
+  child.stderr.on('data', c => { err += c; if (err.length > 20000) err = err.slice(-20000); });
+  child.on('error', () => { clearTimeout(timer); finish(null); });
+  child.on('close', () => {
+    clearTimeout(timer);
+    for (const line of out.split('\n')) {
+      const hit = classifyAuthFailure(line);
+      if (hit) return finish({ ok: false, reason: hit.reason, detail: hit.message });
+    }
+    const se = classifyAuthStderr(err);
+    if (se) return finish({ ok: false, reason: se.reason, detail: se.message });
+    // No auth signal and the probe ran — treat as authenticated. (A non-auth
+    // failure, e.g. a usage limit, leaves auth alone rather than false-clearing.)
+    finish({ ok: true, reason: null, detail: null });
+  });
+}
+
+const AUTH_RECHECK_MIN_MS = 20 * 1000;   // don't re-probe on every window focus
+/**
+ * Establish auth status. Runs the credential check always; escalates to a CLI
+ * probe only when the credentials are inconclusive, or when `force` is set (the
+ * banner's "I've logged in" path, where a definitive answer is worth a turn).
+ */
+function runAuthPreflight(opts, cb) {
+  const { force = false, allowCli = true } = opts || {};
+  cb = cb || (() => {});
+  if (authState.checking) return cb(null, authInfo());
+  if (!force && authState.checkedAt && Date.now() - authState.checkedAt < AUTH_RECHECK_MIN_MS) {
+    return cb(null, authInfo());
+  }
+  authState = { ...authState, checking: true };
+  const settle = (verdict, probe) => {
+    authState = { ...authState, checking: false, checkedAt: Date.now(), probe };
+    if (!verdict) authState = { ...authState, state: authState.state === AUTH_FAILED ? AUTH_FAILED : AUTH_UNKNOWN };
+    else if (verdict.ok) setAuthOk(probe);
+    else setAuthFailed(verdict.reason, verdict.detail);
+    cb(null, authInfo());
+  };
+
+  let verdict = null;
+  try { verdict = preflightCredentials(); } catch { verdict = null; }
+  // A definitive credential failure needs no turn: it's already conclusive.
+  if (verdict && !verdict.ok) return settle(verdict, 'credentials');
+  if (verdict && verdict.ok && !force) return settle(verdict, 'credentials');
+  if (!allowCli) return settle(verdict, 'credentials');
+  preflightCli((_e, cliVerdict) => settle(cliVerdict || verdict, cliVerdict ? 'cli' : 'credentials'));
+}
+
+// Cheap, synchronous snapshot — safe to attach to the 5s /api/sessions poll.
+function authInfo() {
+  const creds = readCredentials();
+  return {
+    state: authState.state,
+    ok: authState.state !== AUTH_FAILED,
+    reason: authState.reason,
+    detail: authState.detail,
+    message: authState.state === AUTH_FAILED ? AUTH_FAILED_MSG : null,
+    at: authState.at,
+    checkedAt: authState.checkedAt,
+    checking: authState.checking,
+    probe: authState.probe,
+    expiresAt: creds ? creds.expiresAt : null,
+    sessionExpiresAt: creds ? creds.refreshTokenExpiresAt : null,
+    credentialSource: creds ? creds.source : null,
+    envOverride: envTokenOverride(),
+  };
 }
 
 // Background-refreshed cache of the usage endpoint (networked; don't block).
@@ -2847,6 +3137,9 @@ const server = http.createServer((req, res) => {
       try { data.version = versionInfo(); } catch {}
       try { data.usage = usageInfo(); } catch {}
       try { data.models = modelsInfo(); } catch {}
+      // App-wide auth status rides the 5s poll, so an expired login surfaces
+      // everywhere at once without its own polling loop.
+      try { data.auth = authInfo(); } catch {}
       return sendJSON(res, 200, data);
     }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
@@ -2865,6 +3158,25 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/models') {
     try { return sendJSON(res, 200, modelsInfo()); }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  // Current auth status — cheap, cached, never spawns anything.
+  if (url.pathname === '/api/auth-status') {
+    try { return sendJSON(res, 200, authInfo()); }
+    catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  // Re-run the preflight. The UI calls this on launch, on wake from sleep, and
+  // when the window regains focus after the login terminal was opened — which
+  // is what lets the banner clear itself. `force` escalates to the CLI probe.
+  if (url.pathname === '/api/auth-recheck' && req.method === 'POST') {
+    return readBody(req, (err, body) => {
+      if (err) return sendJSON(res, 400, { error: 'bad json' });
+      runAuthPreflight({ force: !!(body && body.force) }, (e, info) => {
+        if (e) return sendJSON(res, 500, { error: e.message });
+        sendJSON(res, 200, { ok: true, ...info });
+      });
+    });
   }
 
   if (url.pathname === '/api/update' && req.method === 'POST') {
@@ -2892,7 +3204,7 @@ const server = http.createServer((req, res) => {
     return readBody(req, (err, body) => {
       if (err) return sendJSON(res, 400, { error: 'bad json' });
       chatTurn(body.session, body.text, body.images, body.cwd, (e, info) => {
-        if (e) return sendJSON(res, 400, { error: e.message });
+        if (e) return sendJSON(res, e.authFailed ? 409 : 400, { error: e.message, authFailed: !!e.authFailed });
         sendJSON(res, 200, { ok: true, ...info });
       });
     }, 80 * 1024 * 1024); // allow pasted images
@@ -3124,7 +3436,10 @@ const server = http.createServer((req, res) => {
       error: lastChatError.get(id) || null,
       // Structured flags so the UI can react (offer "Re-login", soften the
       // usage-limit toast) without pattern-matching the human-readable text.
-      needsLogin: lastChatErrorKind.get(id) === 'auth',
+      // App-wide, not per-session: any session is unusable while the login is
+      // dead, even one that has never failed a turn itself.
+      needsLogin: lastChatErrorKind.get(id) === 'auth' || authState.state === AUTH_FAILED,
+      authFailed: authState.state === AUTH_FAILED,
       usageLimited: lastChatErrorKind.get(id) === 'usage',
       needsSetup: lastChatErrorKind.get(id) === 'missing',
       // A turn cut short by a server restart — its progress was saved and it can
@@ -3200,4 +3515,15 @@ server.listen(PORT, HOST, () => {
   // is invisible: live turns are reattached, ones that died in the gap are
   // finalized from their logs. Best-effort — never let it stop the server.
   try { reconcileOnBoot(); } catch (e) { console.error('[claudenav] reconcile on boot failed:', e && e.message); }
+  // Preflight the login at startup so an expired session raises the banner
+  // before the user types, rather than after their first message vanishes into
+  // a dead CLI. Credentials-only by default (free and conclusive for the
+  // "session expired" case); the CLI probe only runs if they're inconclusive.
+  const env = envTokenOverride();
+  if (env && env.shadows) console.warn('[claudenav] WARNING: ' + env.note);
+  runAuthPreflight({}, () => {
+    if (authState.state === AUTH_FAILED) {
+      console.error('[claudenav] login is not usable — headless turns are blocked until you re-authenticate.');
+    }
+  });
 });

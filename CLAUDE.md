@@ -10,6 +10,10 @@ shows live status, and lets you chat with / wrap up sessions from the browser.
 
 ## Layout
 
+- `auth-classify.js` — the terminal-auth-failure classifier, split out of
+  `server.js` (and pure/dependency-free) so it can be unit-tested against real
+  recorded CLI output without booting the server. See **AUTH_FAILED** below.
+- `test/` — `node --test`, no dependencies. `npm test`.
 - `server.js` — the whole backend. Node, no dependencies, binds `127.0.0.1:4317`.
   Parses session transcripts (mtime-cached), detects live terminals via
   `ps`+`lsof`, and exposes the API below.
@@ -22,6 +26,7 @@ shows live status, and lets you chat with / wrap up sessions from the browser.
 ```bash
 node server.js          # http://127.0.0.1:4317
 PORT=5000 node server.js
+npm test                # node --test, no dependencies
 ```
 
 For day-to-day use, run it as a **LaunchAgent** so it survives logout, restarts
@@ -97,14 +102,18 @@ removes both agents.
   built-ins; extraction failures fall back to a placeholder note. Unsupported
   types are rejected client-side with a warning toast.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
-  usageLimited, needsSetup, interrupted, partial}`. `partial` is the in-flight
+  authFailed, usageLimited, needsSetup, interrupted, partial}`. `partial` is the in-flight
   assistant output (`{text, tools}`, block-level — the CLI doesn't stream tokens)
   or `null`. `interrupted` is true when a turn was cut short by a server restart
   (its pid was gone on the next boot before it produced a terminal `result`); the
   UI shows the server's gentle "progress was saved — send again to continue"
   message with no scary "Turn error:" prefix (same treatment as `usageLimited`).
-  `needsLogin` is true on an auth failure; the UI then adds a "Re-login" button
-  to the error toast (opens a terminal via `/api/open {login:true}`).
+  `authFailed` mirrors the app-wide `AUTH_FAILED` state, and `needsLogin` is
+  true when either this session's last turn failed on auth **or** the app-wide
+  state is failed — one dead login makes every session unusable, including ones
+  that have never failed a turn themselves. The UI adds a "Log in" button to the
+  error toast (opens a terminal via `/api/open {login:true}`) and raises the
+  banner; see **AUTH_FAILED** under Conventions.
   `usageLimited` is true when the turn hit a usage/rate limit; the UI shows the
   server's plain-language `error` (which names the reset time when known, and
   suggests switching to a lighter model) without the scary "Turn error:" prefix.
@@ -112,6 +121,14 @@ removes both agents.
   EINVAL — mostly a Windows/PATH problem); the UI swaps the cryptic
   "spawn claude ENOENT" for the server's plain message plus a **"Fix setup"**
   button that opens a help dialog fed by `/api/setup-help`.
+- `GET /api/auth-status` — app-wide auth state: `{state, ok, reason, detail,
+  message, expiresAt, sessionExpiresAt, credentialSource, envOverride, probe,
+  checkedAt}`. `state` is `ok` / `AUTH_FAILED` / `unknown`. Cheap and cached
+  (never spawns anything), so it's also attached to `/api/sessions` as `auth`
+  and rides the 5s poll. See **AUTH_FAILED** under Conventions.
+- `POST /api/auth-recheck {force}` — re-run the preflight. The UI calls it on
+  launch, on window focus, and on wake from sleep; `force` escalates from the
+  credentials check to an actual `claude -p` probe.
 - `GET /api/setup-help` — `{platform, resolved, claudeBin, message, docs,
   steps:[{text, cmd?}]}`: platform-aware guidance for locating/pointing at the
   `claude` binary (Windows uses `where`/`setx CLAUDE_BIN`, Unix uses
@@ -300,11 +317,53 @@ removes both agents.
   than a bare `spawn claude ENOENT`. Set `CLAUDE_BIN` to fix. The startup log
   prints the resolved path (`[claudenav] using claude binary: …`, with
   `(NOT FOUND — set CLAUDE_BIN)` appended when unresolved).
-- **Auth failures in headless turns**: an expired/revoked OAuth token surfaces
-  as API 401 text (`AUTH_ERR_RE`), sometimes with exit 0 (the failure lands in
-  an error `result`). `drainQueue` matches it and sets a "re-login via `/login`"
-  chat error instead of a bare exit code; the auth message wins even when the
-  CLI exits clean. Fix is user-side: `claude` → `/login` in a terminal, retry.
+- **AUTH_FAILED — auth is app-wide state, not a per-session error.** When the
+  CLI's OAuth session has expired and can't be refreshed, `claude -p` does *not*
+  crash: it exits **0** and hands back
+  `"Failed to authenticate: OAuth session expired and could not be refreshed"`
+  as its result, having also written that string into the transcript as an
+  `assistant` message. ClaudeNav used to render it as ordinary Claude prose, so
+  a permanently dead session looked alive and you could keep sending turns
+  forever — each failing identically in milliseconds — with no sign anything was
+  wrong. Re-auth needs an interactive browser flow, so a headless spawn can
+  never recover on its own. The fix has four parts, and they only work together:
+  - **Classify structurally, never by scanning text** (`auth-classify.js`).
+    Precision is the whole ballgame here for the same reason as the usage
+    checks: assistant prose quotes "Failed to authenticate" / "please run
+    /login" constantly (a session *about* this bug is full of them). So the
+    classifier only trusts the CLI's own error carriers — an `is_error` result,
+    a result whose `terminal_reason` is `api_error` (the exit-0 case), a
+    **synthetic** assistant record (`message.model === '<synthetic>'`,
+    `isApiErrorMessage: true`, or a top-level `error` string), and stderr.
+    Within those, `error: "authentication_failed"` is decisive on its own;
+    otherwise the text is matched as a **substring**, because the failure can
+    arrive appended to real output rather than as the whole result. Verified
+    against the full local transcript corpus: 12 461 lines, 39 of them prose
+    quoting the phrases, **0 false positives**, all 11 genuine records caught.
+  - **One app-wide state**, not per-session (`authState`): a dead login breaks
+    every session, so entering `AUTH_FAILED` stops the running turn (the CLI
+    would otherwise keep retrying a 401 it can never satisfy), drops every
+    queued turn across *all* sessions, and raises one banner. `/api/chat`
+    refuses with **409** while in the state — the UI disables the composer, but
+    the API is the real gate, since a stale tab or direct POST would otherwise
+    sail straight through. It clears itself: any turn that produces a clean
+    result is live proof the login works.
+  - **Preflight before the user types**, at boot and on wake/focus. The cheap
+    half reads the stored credentials and is conclusive for the common case —
+    note that an expired *access* token is fine (the CLI refreshes it); the
+    terminal condition is a dead **refresh** token, which is exactly "could not
+    be refreshed". Only when that's inconclusive (or `force`) does it spend a
+    tiny `claude -p "ok" --max-turns 1` probe.
+  - **The environment can shadow the Keychain.** `CLAUDE_CODE_OAUTH_TOKEN` /
+    `ANTHROPIC_API_KEY` in the process environment override stored credentials
+    and **survive re-login**, so the banner would never clear. This is the
+    Finder/launchd case: the app inherits a minimal environment holding whatever
+    was exported when the LaunchAgent was installed, not your login shell's. A
+    token that doesn't match the stored one makes the credential check
+    inconclusive (forcing a real probe), logs a startup WARNING, and is called
+    out by name in the banner.
+  - Test it against **`-p`**, not the interactive CLI: a headless run can fail
+    auth while `claude` in the same directory succeeds.
 - **Usage/rate limits in headless turns**: hitting your token quota surfaces as
   a 429 / "usage limit reached" (`USAGE_ERR_RE`), often with exit 0 like auth.
   `drainQueue` sets a plain-language chat error via `usageErrorMessage` — with
@@ -312,8 +371,10 @@ removes both agents.
   soonest `resets_at` from the cached `/api/usage` bars) and a nudge to switch
   to a lighter model. Precedence in `finish()` is auth > usage > generic;
   surfaced as `usageLimited`/`needsLogin` on `/api/chat-status`.
-- **Both checks match ONLY an error signal, never streamed content** (see
-  `errorSignalText`): the sole stdout source is an **error `result`**'s own
+- **Neither check ever matches streamed content.** Usage uses `errorSignalText`
+  (below); auth uses `auth-classify.js` (above), which is stricter still because
+  it must also catch the exit-0 case that `errorSignalText` deliberately hides.
+  For usage: the sole stdout source is an **error `result`**'s own
   message (`type:"result"` + `is_error:true`, even on exit 0); the other is
   **stderr**. Assistant prose, `user` (tool_result) output, *successful* result
   echoes (whose `result` field just repeats the assistant's final text),

@@ -41,6 +41,24 @@
   .lights .l { display: inline-flex; gap: 5px; align-items: center; }
   .lights .light { width: 10px; height: 10px; }
   /* Usage limits — mirrors Claude Code's /usage menu (session + weekly bars). */
+  /* Auth banner — app-wide, because one expired login breaks every session.
+     The header pill is always visible; the wide bar sits in the chat head next
+     to the model/mode pickers, where the user is about to type. */
+  .authpill { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; font-weight: 600;
+    color: #f85149; background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.45);
+    padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+  .authpill button { font-size: 11px; padding: 2px 8px; }
+  .authbar { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap;
+    background: rgba(248,81,73,.10); border: 1px solid rgba(248,81,73,.45);
+    border-radius: 8px; padding: 10px 12px; margin: 0 0 8px; font-size: 13px; }
+  .authbar .abody { flex: 1; min-width: 240px; }
+  .authbar .atitle { font-weight: 700; color: #f85149; margin-bottom: 3px; }
+  .authbar .adetail { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .authbar .aenv { color: #e3b341; font-size: 12px; margin-top: 6px; }
+  .authbar .arow { display: flex; gap: 8px; align-items: center; }
+  /* A CLI error record that used to render as ordinary Claude prose. */
+  .msg.assistant.errmsg .bubble { background: rgba(248,81,73,.10); border: 1px solid rgba(248,81,73,.40); color: var(--fg); }
+  .msg.assistant.errmsg .who { color: #f85149; }
   .usage { display: inline-flex; gap: 14px; align-items: center; font-size: 12px; color: var(--muted); }
   .usage .u { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
   .usage .u-label { color: var(--muted); }
@@ -539,6 +557,7 @@
   </label>
   <label class="meta" title="By default the dashboard shows sessions active in the last 3 days (any status); older ones are collapsed. Tick to show them all. They stay searchable regardless."><input type="checkbox" id="showStale" /> Show older</label>
   <label class="meta" title="Archived sessions are hidden from the list (they stay searchable and resumable). Tick to show them so you can unarchive."><input type="checkbox" id="showArchived" /> Show archived</label>
+  <span id="authPill" class="authpill" hidden></span>
   <span id="usage" class="usage" hidden></span>
   <span id="lights" class="lights"></span>
   <button id="updateBtn" class="update-btn" hidden></button>
@@ -571,6 +590,7 @@
       </label>
       <button class="chat-close" id="chatClose" title="Close">×</button>
     </div>
+    <div id="chatAuth" class="authbar" hidden></div>
     <div id="chatPublish" class="pubbar" hidden></div>
     <div id="chatBody" class="chat-body"></div>
     <div class="chat-compose" id="chatCompose"></div>
@@ -1003,6 +1023,134 @@ function toast(msg, isErr, action) {
   t._t = setTimeout(() => { t.className = 'toast'; t._msg = null; }, action ? 8000 : 3200);
 }
 
+// --- AUTH_FAILED — app-wide -------------------------------------------------
+// One expired login breaks every session, so auth is surfaced once (header pill
+// + a bar beside the model/mode pickers) rather than as a per-session error,
+// and the composer is disabled until it clears. The state rides the 5s
+// /api/sessions poll; we additionally re-check on focus and on wake from sleep,
+// so the banner appears before the user types and clears itself after re-login.
+let AUTH = { state: 'unknown', ok: true };
+const authFailed = () => AUTH.state === 'AUTH_FAILED';
+
+function handleAuth(a) {
+  if (!a) return;
+  const was = authFailed();
+  AUTH = a;
+  renderAuth();
+  // Entering the state: stop pretending a turn is in flight, and take back the
+  // composer immediately rather than waiting for the next render.
+  if (!was && authFailed()) {
+    clearStreaming();
+    setStatus(false, 0);
+    toast('Your Claude Code login has expired — sending is paused', true,
+      { label: 'Log in', fn: openLoginTerminal });
+  }
+  if (was && !authFailed()) toast('Login restored — you can send messages again');
+}
+
+function renderAuth() {
+  const bad = authFailed();
+  const pill = document.getElementById('authPill');
+  if (pill) {
+    pill.hidden = !bad;
+    if (bad && !pill.dataset.built) {
+      pill.dataset.built = '1';
+      pill.innerHTML = `<span>⚠ Login expired</span><button class="ghost" id="authPillFix">Log in</button>`;
+      pill.querySelector('#authPillFix').onclick = openLoginTerminal;
+    }
+    if (!bad) pill.dataset.built = '';
+  }
+
+  const bar = document.getElementById('chatAuth');
+  if (bar) {
+    bar.hidden = !bad;
+    // Rebuild only when the content actually changes — renderAuth runs on every
+    // 5s poll, and re-writing innerHTML each time would flicker and drop focus.
+    const key = bad ? [AUTH.detail, AUTH.envOverride && AUTH.envOverride.note].join('|') : '';
+    if (bad && bar.dataset.key !== key) {
+      bar.dataset.key = key;
+      const detail = AUTH.detail ? `<div class="adetail">The CLI reported: “${esc(AUTH.detail)}”</div>` : '';
+      // A stale token in the environment beats the Keychain and survives
+      // re-login, so re-authenticating would appear to do nothing. Say so.
+      const env = AUTH.envOverride && AUTH.envOverride.shadows
+        ? `<div class="aenv">⚠ ${esc(AUTH.envOverride.note)}</div>` : '';
+      bar.innerHTML = `
+        <div class="abody">
+          <div class="atitle">Your Claude Code login has expired</div>
+          <div>Signing in needs an interactive browser flow, so ClaudeNav can’t do it for you.
+            Open a terminal, run <code>claude</code>, and finish <code>/login</code> there.
+            Sending is paused in <em>every</em> session until it’s done.</div>
+          ${detail}${env}
+        </div>
+        <div class="arow">
+          <button id="authFix">Open terminal &amp; log in</button>
+          <button id="authRecheck" class="ghost">Re-check</button>
+        </div>`;
+      bar.querySelector('#authFix').onclick = openLoginTerminal;
+      bar.querySelector('#authRecheck').onclick = () => recheckAuth(true);
+    }
+  }
+  applyAuthToCompose();
+}
+
+// Disable the composer while the login is dead. The server refuses the send
+// regardless (that's the real gate) — this just stops the user typing into a
+// dead end and getting an error a few milliseconds later.
+function applyAuthToCompose() {
+  const bad = authFailed();
+  const box = document.getElementById('composeBox');
+  const send = document.getElementById('sendBtn');
+  const attach = document.getElementById('attachBtn');
+  if (box) {
+    box.disabled = bad;
+    if (bad) {
+      if (!box.dataset.ph) box.dataset.ph = box.placeholder;
+      box.placeholder = 'Sending is paused — your Claude Code login has expired. Log in in a terminal to continue.';
+    } else if (box.dataset.ph) {
+      box.placeholder = box.dataset.ph;
+    }
+  }
+  if (send) { send.disabled = bad; send.title = bad ? 'Login expired — re-authenticate in a terminal first' : ''; }
+  if (attach) attach.disabled = bad;
+}
+
+let recheckInFlight = false;
+async function recheckAuth(force) {
+  if (recheckInFlight) return;
+  recheckInFlight = true;
+  try {
+    const r = await fetch('/api/auth-recheck', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: !!force }),
+    });
+    const j = await r.json();
+    if (r.ok) handleAuth(j);
+    else if (force) toast('Auth check failed: ' + (j.error || 'unknown'), true);
+  } catch (e) {
+    if (force) toast('Auth check failed: ' + e.message, true);
+  } finally { recheckInFlight = false; }
+}
+
+// Re-check when the window regains focus — this is what clears the banner after
+// the user finishes /login in the terminal we opened and comes back. Forced
+// (i.e. worth a CLI probe) only when we're currently in the failed state.
+window.addEventListener('focus', () => { recheckAuth(authFailed()); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) recheckAuth(authFailed());
+});
+
+// Wake from sleep: the machine can be suspended for hours and come back with a
+// long-dead session. Timers don't fire while asleep, so a wall-clock jump much
+// larger than the interval is the tell.
+(function watchForWake() {
+  let last = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    if (now - last > 90 * 1000) recheckAuth(true);   // slept (or was throttled hard)
+    last = now;
+  }, 30 * 1000);
+})();
+
 // Open a terminal with `claude /login` running — the fix for expired OAuth
 // credentials (the flow is interactive-only, so ClaudeNav can't run it itself).
 async function openLoginTerminal() {
@@ -1013,7 +1161,10 @@ async function openLoginTerminal() {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'failed');
-    toast('Opened ' + termApp() + ' — finish /login there, then retry your message');
+    toast('Opened ' + termApp() + ' — finish /login there, then come back; this clears itself');
+    // The focus handler catches the usual case (log in, switch back). This
+    // covers staying in the browser while logging in on another display.
+    setTimeout(() => recheckAuth(true), 15000);
   } catch (e) {
     toast('Could not open terminal: ' + e.message, true);
   }
@@ -1637,6 +1788,7 @@ function renderCompose(p, s) {
     if (files.some(f => attachKind(f))) { ev.preventDefault(); addFiles(files); }
   });
   renderAttachments();
+  applyAuthToCompose();   // a freshly-rendered composer must respect AUTH_FAILED
   box.focus();
 }
 
@@ -1730,6 +1882,14 @@ async function doSend() {
   const text = box.value.trim();
   const images = chat.attachments.slice();
   if (!text && !images.length) return; // sending while a turn runs is fine — it queues server-side
+  // Never let a "continue" into a dead session reach the CLI. The server
+  // refuses it too; this keeps the typed message in the box instead of
+  // bouncing it back through the error path.
+  if (authFailed()) {
+    toast('Login expired — log in in a terminal before sending', true,
+      { label: 'Log in', fn: openLoginTerminal });
+    return;
+  }
   ensureNotifyPermission(); // ask once, on this user gesture
   box.value = '';
   chat.attachments = [];
@@ -1892,8 +2052,15 @@ async function checkChatStatus() {
     } else if (!j.running) {
       clearStreaming();
     }
+    // The turn died on auth — raise the app-wide banner now rather than waiting
+    // for the next 5s sessions poll, so the composer locks immediately.
+    if (j.authFailed && !authFailed()) recheckAuth(false);
     if (j.error && !j.running) {
-      if (j.usageLimited || j.interrupted) {
+      if (j.authFailed) {
+        // The banner already explains this and offers the fix; a duplicate
+        // "Turn error:" toast on top of it is just noise.
+        toast(j.error, true, { label: 'Log in', fn: openLoginTerminal });
+      } else if (j.usageLimited || j.interrupted) {
         // Not a crash — either a usage limit or a turn cut short by a server
         // restart (its progress was saved). The server already phrased it as
         // plain, actionable guidance, so show it as-is with no scary "Turn
@@ -2001,8 +2168,16 @@ function renderMsg(m) {
   const tools = renderTools(m.tools);
   const text = m.text ? `<div class="bubble">${md(m.text)}</div>` : '';
   const ask = m.ask ? renderAsk(m.ask) : '';
-  return `<div class="msg ${m.role}">
-    <div class="who">${m.role === 'user' ? 'You' : 'Claude'}</div>${text}${tools}${ask}</div>`;
+  // Some transcript "assistant" records are the CLI reporting its own failure
+  // (an expired login writes one). Attribute it to the CLI, not to Claude —
+  // rendering it as ordinary prose is what made a dead session look alive.
+  const err = m.isError ? ' errmsg' : '';
+  const who = m.role === 'user' ? 'You'
+    : m.errorKind === 'auth' ? 'Claude Code · login expired'
+    : m.isError ? 'Claude Code · error'
+    : 'Claude';
+  return `<div class="msg ${m.role}${err}">
+    <div class="who">${who}</div>${text}${tools}${ask}</div>`;
 }
 
 // Render an AskUserQuestion as a card of clickable options. Starts inert;
@@ -2316,6 +2491,7 @@ async function load() {
     handleVersion(DATA.version);
     handleUsage(DATA.usage);
     handleModels(DATA.models);
+    handleAuth(DATA.auth);
     if (!hashJumped) { hashJumped = true; jumpToHashSession(); } // honor #session=… on first load
   } catch (e) {
     // load() is both the initial fetch and the 5s poll. A transient poll
