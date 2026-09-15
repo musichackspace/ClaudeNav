@@ -50,7 +50,7 @@ if [ -n "$probe_ok" ]; then
   boot=$(printf '%s' "$v" | grep -o '"bootHead":"[^"]*"' | cut -d'"' -f4)
   if [ -n "$head" ] && [ -n "$boot" ] && [ "$head" != "$boot" ]; then
     echo "=== $(date '+%Y-%m-%d %H:%M:%S') watchdog: stale code (running $boot, disk at $head) — relaunching ===" >> "$LOG"
-    curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+    curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' -H 'X-ClaudeNav: watchdog' \
       -d '{"pull":false}' "http://$HOST:$PORT/api/update" >/dev/null 2>>"$LOG"
   fi
   exit 0

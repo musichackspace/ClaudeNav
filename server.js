@@ -2838,8 +2838,56 @@ function readBody(req, cb, maxBytes = 1e6) {
   req.on('end', () => { try { cb(null, data ? JSON.parse(data) : {}); } catch (e) { cb(e); } });
 }
 
+// Cross-site request forgery guard. The server binds to loopback, but any web
+// page you visit can still fire a no-cors `fetch()` at 127.0.0.1:PORT — the
+// response is opaque to it, yet the side effect (a headless turn under
+// --dangerously-skip-permissions, a publish, a terminal window) still happens.
+// Three checks, in order of what they defeat:
+//   1. Host must be loopback — stops DNS rebinding (attacker.com → 127.0.0.1
+//      would otherwise be "same-origin" from the browser's point of view).
+//   2. Origin (when sent) must be this server; `Sec-Fetch-Site` (when sent) must
+//      be same-origin/none — rejects the cross-site POST outright.
+//   3. Mutating requests must carry `X-ClaudeNav`. A custom header makes a
+//      cross-site request non-simple, so the browser preflights it with OPTIONS;
+//      we answer that without CORS headers and the real request is never sent.
+// GETs are already unreadable cross-site (no Access-Control-Allow-Origin), so
+// only Host applies to them. The UI adds the header via a `fetch` wrapper; curl
+// callers add `-H 'X-ClaudeNav: 1'`.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+function isLocalHostHeader(h) {
+  if (!h) return false;
+  const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(h);
+  if (!m) return false;
+  return LOOPBACK_HOSTS.has(m[1].toLowerCase()) && (!m[2] || Number(m[2]) === PORT);
+}
+function csrfReject(req) {
+  if (!isLocalHostHeader(req.headers.host)) return 'bad Host header (not loopback)';
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let ok = false;
+    try { const o = new URL(origin); ok = o.protocol === 'http:' && isLocalHostHeader(o.host); } catch {}
+    if (!ok) return 'cross-site request refused (Origin)';
+  }
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return 'cross-site request refused (Sec-Fetch-Site)';
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !req.headers['x-claudenav']) {
+    return 'missing X-ClaudeNav header (mutating requests must come from the ClaudeNav UI)';
+  }
+  return null;
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
+
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+  {
+    const why = csrfReject(req);
+    if (why) {
+      console.error(`[claudenav] refused ${req.method} ${url.pathname}: ${why}` +
+        (req.headers.origin ? ` origin=${req.headers.origin}` : '') + ` host=${req.headers.host}`);
+      return sendJSON(res, 403, { error: why });
+    }
+  }
 
   if (url.pathname === '/api/sessions') {
     try {

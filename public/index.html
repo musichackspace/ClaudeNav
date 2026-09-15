@@ -790,6 +790,21 @@
 <div id="toast" class="toast"></div>
 
 <script>
+// Every API call goes through the native fetch with one extra header. The server
+// refuses mutating requests without it (its CSRF guard — a cross-site page can
+// POST to 127.0.0.1 but can't attach a custom header without a preflight, which
+// the server doesn't grant). Wrapping here means no call site can forget it.
+{
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const sameOrigin = typeof input === 'string' ? !/^[a-z]+:/i.test(input) || input.startsWith(location.origin)
+      : new URL(input.url || String(input), location.href).origin === location.origin;
+    if (!sameOrigin) return nativeFetch(input, init);
+    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+    headers.set('X-ClaudeNav', '1');
+    return nativeFetch(input, { ...init, headers });
+  };
+}
 let DATA = { projects: [] };
 let showAllProjects = false;
 const collapsed = new Set(JSON.parse(localStorage.getItem('cn-collapsed') || '[]'));

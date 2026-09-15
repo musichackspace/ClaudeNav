@@ -280,6 +280,16 @@ removes both agents.
 
 ## Conventions / gotchas
 
+- **Every request passes a CSRF guard** (`csrfReject`). The server binds to
+  loopback, but any web page can still fire a no-cors `fetch()` at
+  `127.0.0.1:4317` and the side effect lands (verified: headless Chrome delivered
+  an attacker page's POST to `/api/chat`). So: `Host` must be loopback (defeats
+  DNS rebinding), `Origin`/`Sec-Fetch-Site` when present must be same-origin, and
+  **every non-GET must carry an `X-ClaudeNav` header** — the UI adds it via a
+  `window.fetch` wrapper at the top of `index.html`, `watchdog.sh` adds it to its
+  curl, and `OPTIONS` is answered without CORS headers so a cross-site preflight
+  never gets the real request through. Scripting the API by hand? Add
+  `-H 'X-ClaudeNav: 1'` to POSTs. Refusals log as `[claudenav] refused …`.
 - Headless turns default to the `bypassPermissions` mode, spawned with
   `--dangerously-skip-permissions` (set `CLAUDE_SAFE=1` to drop it — bypass then
   degrades to `--permission-mode default`). Any other per-session mode (see
@@ -367,29 +377,21 @@ removes both agents.
 
 ## Outstanding / TODO
 
-- [ ] **Headless Resume**: `Resume ▸` still opens a Terminal. Clicking a row
+The prioritized plan lives in `docs/ROADMAP.md`. Short list of what's still open:
+
+- [ ] **Tests** — none exist yet. First targets are the regressions the gotchas
+      above describe (see the roadmap).
+- [ ] **Split `server.js` / `index.html`** into modules (still no build step).
+- [ ] **Headless Resume**: `Resume ▸` still opens a Terminal; clicking a row
       opens the in-browser chat, but there's no explicit headless-resume button.
-- [ ] **Screenshot**: `README.md` references `docs/screenshot.png`, which does
-      not exist — add it or drop the reference.
 - [ ] **`/api/close` untested live**: the graceful-exit path is implemented but
       never exercised against a real session. Also it kills *all* `claude`
       processes in a folder (fine for safe, non-busy folders; confirm in UI).
 - [ ] **Per-row AI deep-check**: `assess` is wired into the wrap panel per
       folder; add an explicit per-session "is this mid-task?" button if wanted.
-- [x] **Chat optimistic echo**: sent messages render immediately (`.optimistic`
-      bubble) and are retracted once the transcript poll confirms them.
-- [x] **Streaming + stop**: turns run with `stream-json`; assistant blocks are
-      previewed live via `chat-status.partial`, and a Stop button cancels the
-      running turn + queue (`/api/chat-cancel`). Note: block-level only — the
-      CLI's `stream-json` doesn't emit token deltas, so a single text block
-      still appears all at once when it completes.
 - [ ] **Bulk commit**: wrap has per-folder commit/push and a "wrap all safe"
       orchestrator, but no standalone "commit all unsaved".
-- [ ] **Cross-platform**: terminal-opening works on macOS (AppleScript),
-      Windows (`cmd /k` console), and Linux (first of x-terminal-emulator /
-      gnome-terminal / konsole / xfce4-terminal / xterm that launches) — covers
-      the `gh`/`claude` login onboarding and session-resume. A headless Linux box
-      with no emulator (or an unknown platform) still gets the read-only
-      dashboard + headless chat, with an actionable "run this yourself" error
-      when it tries to open a terminal.
+- [ ] **`github-history/`** is an unrelated app living in this repo — move out.
 - [ ] **LICENSE holder** is "JB"; adjust if it should be the org.
+- [x] Screenshot (`docs/screenshot.png`), chat optimistic echo, streaming + stop,
+      cross-platform terminal opening, CSRF guard.
