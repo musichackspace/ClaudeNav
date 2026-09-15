@@ -91,7 +91,14 @@ Original plan:
   is older than server".
 - Decide the LICENSE holder.
 
-## 5. Product
+## 5. Product — done except cost
+
+Transcript search, Chat button, notifications (question pending + background
+session finished), "while you were away" strip: shipped. **Cost per session is
+not done**: it needs a per-model price table and I won't guess prices — add one
+(with a "last checked" date) from the official pricing page when wanted.
+
+Original plan:
 
 Roughly in order of value:
 
@@ -112,7 +119,13 @@ Roughly in order of value:
   per-model prices (hand-maintained table with a "last checked" date) and the
   row shows an approximate spend.
 
-## 6. Robustness
+## 6. Robustness — done except the /api/close UI confirm
+
+One atomic state file (`lib/store.js`), slow-request log (`CLAUDENAV_SLOW_MS`),
+bulk commit: shipped. `/api/close` is exercised by `test/close.test.js` against a
+fake `claude` process under a pty (real code path: ps + lsof + SIGTERM).
+
+Original plan:
 
 - **One state file.** `claudenav-modes.json`, `-models.json`, `-archived.json`,
   `-sites.json`, plus the per-port runs/queue files, become one

@@ -149,7 +149,7 @@ removes both agents.
   isn't logged as an error) and drop anything queued behind it.
 - `POST /api/session-mode {session, mode}` — pin the permission mode the next
   headless turn runs under (`default`/`plan`/`acceptEdits`/`auto`/
-  `bypassPermissions`/`dontAsk`). Persisted to `~/.claude/claudenav-modes.json`.
+  `bypassPermissions`/`dontAsk`). Persisted in `~/.claude/claudenav-state.json` (`modes`).
   Each session in `/api/sessions` carries `permissionMode` (the mode of its last
   recorded turn), `modeOverride` (the pinned value, or null), and `mode` (the
   effective mode = override ?? last transcript mode ?? `bypassPermissions`).
@@ -158,7 +158,7 @@ removes both agents.
   override → inherit the CLI/account default) or any id from `/api/models`
   (e.g. `claude-opus-4-8`) — passed to the CLI as `--model <id>`. Validated by
   format only (the live list is authoritative; the CLI rejects a bogus id).
-  Persisted to `~/.claude/claudenav-models.json`. Each session in
+  Persisted in `~/.claude/claudenav-state.json` (`models`). Each session in
   `/api/sessions` carries `modelOverride` (the pinned id, or null) and `model`
   (the effective choice = override ?? canonical id of the last-used transcript
   model ?? `default`).
@@ -175,8 +175,8 @@ removes both agents.
   to known-session directories.
 - `POST /api/archive {session, archived}` — tuck a session away (or restore it
   with `archived:false`). Hidden from the default list regardless of
-  recency/status, but stays searchable and resumable. Persisted to
-  `~/.claude/claudenav-archived.json` (a flat array of session IDs); each session
+  recency/status, but stays searchable and resumable. Persisted in
+  `~/.claude/claudenav-state.json` (`archived`, a flat array of session IDs); each session
   in `/api/sessions` carries an `archived` boolean. The UI's "Show archived"
   toggle reveals them so you can unarchive.
 - `GET /api/browse?path=<dir>` — list a folder's immediate sub-directories
@@ -234,7 +234,7 @@ removes both agents.
   and serving), `failed` (build errored), `offline` (has a GitHub remote but
   Pages off), `local` (no remote), `repo` (GitHub remote but *not* a website —
   see `isSite`), `nonrepo`/`unknown`. `isSite` = Pages already enabled **or** the
-  folder is in the wizard's sites registry (`~/.claude/claudenav-sites.json`,
+  folder is in the wizard's sites registry (`sites` in `~/.claude/claudenav-state.json`,
   written by `site-create`/`site-import`); a non-site repo returns `repo` and the
   UI shows no pill, so ordinary code projects (ClaudeNav itself) don't get a
   misleading "Not online". The honest rule for
@@ -285,6 +285,12 @@ removes both agents.
   command with `; exec bash` to keep the window open. If none of those launch
   (or the platform is unknown) it returns an actionable error naming the command
   to run by hand. `/uploads/<name>` — serves pasted attachments (images and PDFs).
+- `GET /api/search?q=<text>` — full-text search over what was said in every
+  session: `{q, hits:[{sessionId, snippet, mtimeMs}], scanned}`. Prose only (user
+  + assistant text, no tool output), extracted lazily on the first search and
+  cached per file by mtime+size; files are read async and the walk yields between
+  files so the poll isn't stalled. Needs ≥ 2 chars; capped at 60 hits, newest
+  first. Drives the header search box (debounced 250ms; row shows the passage).
 - `GET /api/version` — `{version, bootId, bootHead, head, branch, dirty, behind,
   hasRemote, canUpdate}`. `version` is `package.json`'s (bump it + tag on release). `bootId`/`bootHead` describe the running process; `head`/`behind`
   reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
@@ -318,6 +324,13 @@ removes both agents.
   curl, and `OPTIONS` is answered without CORS headers so a cross-site preflight
   never gets the real request through. Scripting the API by hand? Add
   `-H 'X-ClaudeNav: 1'` to POSTs. Refusals log as `[claudenav] refused …`.
+- **Persisted state lives in one file**, `~/.claude/claudenav-state.json`
+  (`{modes, models, archived, sites}`), managed by `lib/store.js`. Every write is
+  atomic (temp file + rename) so a crash mid-write can't truncate it. The four
+  legacy files (`claudenav-modes/-models/-archived/-sites.json`) are folded in
+  once, on the first boot that finds no state file, and then left alone. Per-port
+  turn state (`claudenav-runs-<PORT>.json` / `-queue-<PORT>.json`) stays separate
+  — two instances must not share it — but uses the same atomic writer.
 - Headless turns default to the `bypassPermissions` mode, spawned with
   `--dangerously-skip-permissions` (set `CLAUDE_SAFE=1` to drop it — bypass then
   degrades to `--permission-mode default`). Any other per-session mode (see
@@ -407,16 +420,15 @@ removes both agents.
 
 The prioritized plan lives in `docs/ROADMAP.md`. Short list of what's still open:
 
-- [ ] **Headless Resume**: `Resume ▸` still opens a Terminal; clicking a row
-      opens the in-browser chat, but there's no explicit headless-resume button.
-- [ ] **`/api/close` untested live**: the graceful-exit path is implemented but
-      never exercised against a real session. Also it kills *all* `claude`
-      processes in a folder (fine for safe, non-busy folders; confirm in UI).
+- [ ] **`/api/close` kills *all* `claude` processes in a folder** (fine for
+      safe, non-busy folders). The path itself is covered by `test/close.test.js`
+      (fake `claude` under a pty); a UI confirm listing the pids would be the
+      remaining nicety.
 - [ ] **Per-row AI deep-check**: `assess` is wired into the wrap panel per
       folder; add an explicit per-session "is this mid-task?" button if wanted.
-- [ ] **Bulk commit**: wrap has per-folder commit/push and a "wrap all safe"
-      orchestrator, but no standalone "commit all unsaved".
 - [ ] **LICENSE holder** is "JB"; adjust if it should be the org.
 - [x] Screenshot (`docs/screenshot.png`), chat optimistic echo, streaming + stop,
       cross-platform terminal opening, CSRF guard, test suite + CI, `lib/` split,
-      `github-history/` moved to its own repo (`~/Docs/github-history`).
+      `github-history/` moved to its own repo (`~/Docs/github-history`), transcript
+      search (`/api/search`), per-row Chat button, "while you were away" strip,
+      bulk commit, one atomic state file, slow-request log.
