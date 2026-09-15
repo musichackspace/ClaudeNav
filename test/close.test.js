@@ -25,7 +25,10 @@ test('closeSession SIGTERMs the live claude in the session cwd', { skip: !darwin
   const marker = path.join(work, 'got-term');
   // The pty wrapper (`script … /claude`) matches the claude regex too and dies
   // on the same SIGTERM, which HUPs the shell inside — so record either signal.
-  fs.writeFileSync(fake, `#!/bin/sh\ntrap 'echo term > "${marker}"; exit 0' TERM\ntrap 'echo hup > "${marker}"; exit 0' HUP\nwhile :; do sleep 0.2; done\n`, { mode: 0o755 });
+  // `ready` is written only after the traps are installed: signalling earlier
+  // would kill a shell that hasn't set them yet and prove nothing.
+  const ready = path.join(work, 'ready');
+  fs.writeFileSync(fake, `#!/bin/sh\ntrap 'echo term > "${marker}"; exit 0' TERM\ntrap 'echo hup > "${marker}"; exit 0' HUP\necho ok > "${ready}"\nwhile :; do sleep 0.2; done\n`, { mode: 0o755 });
   const projDir = path.join(HOME, '.claude', 'projects', 'x'); fs.mkdirSync(projDir, { recursive: true });
   fs.writeFileSync(path.join(projDir, SID + '.jsonl'), jsonl([
     { type: 'user', sessionId: SID, cwd: work, timestamp: '2026-09-01T10:00:00Z', message: { role: 'user', content: 'hi' } },
@@ -34,7 +37,8 @@ test('closeSession SIGTERMs the live claude in the session cwd', { skip: !darwin
   // `script` allocates a pty and runs the fake claude inside it.
   const child = spawn('script', ['-q', '/dev/null', fake], { cwd: work, stdio: 'ignore' });
   const exited = new Promise(r => child.on('exit', r));
-  // Give ps/lsof something to find.
+  for (let i = 0; i < 40 && !fs.existsSync(ready); i++) await sleep(100);
+  assert.equal(fs.existsSync(ready), true, 'fake claude should have started');
   let found = false;
   for (let i = 0; i < 20 && !found; i++) {
     await sleep(150);
