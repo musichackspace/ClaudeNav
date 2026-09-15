@@ -2027,17 +2027,20 @@ function worktreeBase(cwd) {
 // commits the worktrees tree into the site, and a fast-forward sync looks unsafe.
 // Written to .git/info/exclude — local and untracked, so we never edit a file the
 // user owns. Idempotent.
+const excludedRepos = new Set(); // cwd -> already ensured this process (keeps polls cheap)
 function excludeWorktrees(cwd) {
+  if (excludedRepos.has(cwd)) return;
   try {
     let dir = git(cwd, ['rev-parse', '--git-common-dir']);
     if (!path.isAbsolute(dir)) dir = path.resolve(cwd, dir);
     const file = path.join(dir, 'info', 'exclude');
     const line = '.claude/worktrees/';
     const cur = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-    if (cur.split('\n').some(l => l.trim() === line)) return;
+    if (cur.split('\n').some(l => l.trim() === line)) { excludedRepos.add(cwd); return; }
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, (cur && !cur.endsWith('\n') ? cur + '\n' : cur) +
       '# ClaudeNav session worktrees\n' + line + '\n');
+    excludedRepos.add(cwd);
   } catch { /* best-effort — a missing exclude only costs cosmetics */ }
 }
 
@@ -2507,9 +2510,13 @@ function siteStatus(cwd) {
   if (!abs || !fs.existsSync(abs)) return { state: 'unknown', label: 'Unknown' };
   if (gitTry(abs, ['rev-parse', '--is-inside-work-tree']) !== 'true') return { state: 'nonrepo', label: 'Not a website project' };
 
-  // Our own session-worktree directory is not the user's change. excludeWorktrees
-  // keeps it out of `status` for repos we've touched; filter it here too so a repo
-  // that predates that (or was cloned fresh) doesn't read as permanently "Draft".
+  // Our own session-worktree directory is not the user's change. Make git hide it
+  // BEFORE asking for status: `--porcelain` collapses an untracked directory to a
+  // single `?? .claude/` line, which no `.claude/worktrees/` filter can match — so
+  // a repo that predates the exclude (or was cloned fresh) read as permanently
+  // "Draft" until this ran. The line filter stays as a second net for the case
+  // where the exclude file couldn't be written (test/git.test.js covers both).
+  excludeWorktrees(abs);
   const changes = gitTry(abs, ['status', '--porcelain']).split('\n')
     .filter(Boolean).filter(l => !/\.claude\/worktrees\//.test(l));
   const dirty = changes.length > 0;
@@ -2858,7 +2865,9 @@ function isLocalHostHeader(h) {
   if (!h) return false;
   const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(h);
   if (!m) return false;
-  return LOOPBACK_HOSTS.has(m[1].toLowerCase()) && (!m[2] || Number(m[2]) === PORT);
+  // The port we're actually bound to (tests listen on an ephemeral one), else PORT.
+  const bound = (typeof server !== 'undefined' && server.listening && server.address().port) || PORT;
+  return LOOPBACK_HOSTS.has(m[1].toLowerCase()) && (!m[2] || Number(m[2]) === bound);
 }
 function csrfReject(req) {
   if (!isLocalHostHeader(req.headers.host)) return 'bad Host header (not loopback)';
@@ -3240,7 +3249,9 @@ server.on('error', (e) => {
   throw e;
 });
 
-server.listen(PORT, HOST, () => {
+// Only bind when run directly. `require('./server')` (tests) gets the helpers
+// below without starting a server or touching the network.
+if (require.main === module) server.listen(PORT, HOST, () => {
   if (bindAttempts) console.log(`Port ${PORT} freed up after ${bindAttempts} retr${bindAttempts > 1 ? 'ies' : 'y'}.`);
   console.log(`ClaudeNav running at http://${HOST}:${PORT}`);
   console.log(`Reading sessions from ${PROJECTS_DIR}`);
@@ -3249,3 +3260,12 @@ server.listen(PORT, HOST, () => {
   // finalized from their logs. Best-effort — never let it stop the server.
   try { reconcileOnBoot(); } catch (e) { console.error('[claudenav] reconcile on boot failed:', e && e.message); }
 });
+
+module.exports = {
+  // pure-ish helpers, exported for tests (node --test test/)
+  parseSessionFile, parseTranscript, foldLine, freshAcc, accToData,
+  errorSignalText, usageErrorMessage, formatResetTime, AUTH_ERR_RE, USAGE_ERR_RE,
+  isLocalHostHeader, csrfReject,
+  siteStatus, excludeWorktrees, underHome, git, gitTry, gitOk, repoNwo, publishBranch, mainCheckout,
+  server, PORT, HOST,
+};

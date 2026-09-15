@@ -1,10 +1,13 @@
 {
   "name": "claudenav",
   "version": "1.0.0",
-  "description": "A local navigator for your Claude Code sessions — see what every terminal is doing and jump between them.",
-  "bin": { "claudenav": "server.js" },
+  "description": "A local navigator for your Claude Code sessions \u2014 see what every terminal is doing and jump between them.",
+  "bin": {
+    "claudenav": "server.js"
+  },
   "scripts": {
     "start": "node server.js",
+    "test": "node --test",
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",
