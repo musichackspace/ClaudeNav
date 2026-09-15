@@ -285,8 +285,8 @@ removes both agents.
   command with `; exec bash` to keep the window open. If none of those launch
   (or the platform is unknown) it returns an actionable error naming the command
   to run by hand. `/uploads/<name>` — serves pasted attachments (images and PDFs).
-- `GET /api/version` — `{bootId, bootHead, head, branch, dirty, behind, hasRemote,
-  canUpdate}`. `bootId`/`bootHead` describe the running process; `head`/`behind`
+- `GET /api/version` — `{version, bootId, bootHead, head, branch, dirty, behind,
+  hasRemote, canUpdate}`. `version` is `package.json`'s (bump it + tag on release). `bootId`/`bootHead` describe the running process; `head`/`behind`
   reflect on-disk + upstream (background `git fetch`, ≤ every 5 min). Also attached
   to `/api/sessions` as `version`, so the 5s poll surfaces updates for free.
 - `GET /api/usage` — usage limits mirroring Claude Code's `/usage` menu
@@ -407,9 +407,6 @@ removes both agents.
 
 The prioritized plan lives in `docs/ROADMAP.md`. Short list of what's still open:
 
-- [ ] **Tests** — none exist yet. First targets are the regressions the gotchas
-      above describe (see the roadmap).
-- [ ] **Split `server.js` / `index.html`** into modules (still no build step).
 - [ ] **Headless Resume**: `Resume ▸` still opens a Terminal; clicking a row
       opens the in-browser chat, but there's no explicit headless-resume button.
 - [ ] **`/api/close` untested live**: the graceful-exit path is implemented but
@@ -419,7 +416,7 @@ The prioritized plan lives in `docs/ROADMAP.md`. Short list of what's still open
       folder; add an explicit per-session "is this mid-task?" button if wanted.
 - [ ] **Bulk commit**: wrap has per-folder commit/push and a "wrap all safe"
       orchestrator, but no standalone "commit all unsaved".
-- [ ] **`github-history/`** is an unrelated app living in this repo — move out.
 - [ ] **LICENSE holder** is "JB"; adjust if it should be the org.
 - [x] Screenshot (`docs/screenshot.png`), chat optimistic echo, streaming + stop,
-      cross-platform terminal opening, CSRF guard.
+      cross-platform terminal opening, CSRF guard, test suite + CI, `lib/` split,
+      `github-history/` moved to its own repo (`~/Docs/github-history`).

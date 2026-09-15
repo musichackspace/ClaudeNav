@@ -11,7 +11,14 @@ everything after it cheaper.
 without CORS. The UI adds the header through a `window.fetch` wrapper so no
 call site can forget it. See the CLAUDE.md gotcha.
 
-## 2. Tests (next)
+## 2. Tests — done
+
+`npm test` → `node --test`, 34 tests in `test/`, CI in `.github/workflows/test.yml`.
+Writing the worktree test found and fixed a real bug (collapsed `?? .claude/`
+status line defeating the worktree filter). Original plan kept below for the
+parts still open (pre-commit hook).
+
+### Original plan
 
 Zero tests today for a tool that pushes code to the internet. Use `node --test`
 (Node 18+, no dependencies), `npm test` runs `node --test test/`.
@@ -43,7 +50,10 @@ Order of work:
 5. Wire `npm test` into a pre-commit hook or a GitHub Action (the repo is
    public, so Actions are free).
 
-## 3. Split the two big files
+## 3. Split the two big files — done
+
+`lib/` (13 modules, no cycles) + `public/app.css` / `app.js` / `markdown.js`.
+See CLAUDE.md → Layout. Original plan:
 
 Keep zero dependencies and no build step; "one file" was never the goal.
 
@@ -66,7 +76,13 @@ Keep zero dependencies and no build step; "one file" was never the goal.
 Do this in several small commits (one module at a time, `node --check` + tests
 green after each) so worktree merges stay conflict-free.
 
-## 4. Repo hygiene
+## 4. Repo hygiene — mostly done
+
+`github-history/` extracted (with history) to `~/Docs/github-history` (push it to
+GitHub yourself when ready). `package.json` is 1.1.0 and `/api/version` reports
+it; tag `v1.1.0` on main after merging. LICENSE holder still your call.
+
+Original plan:
 
 - Move `github-history/` to its own repo. It shares nothing with ClaudeNav and
   the `bin`/`npm start` entry doesn't know about it.

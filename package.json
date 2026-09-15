@@ -1,6 +1,6 @@
 {
   "name": "claudenav",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A local navigator for your Claude Code sessions \u2014 see what every terminal is doing and jump between them.",
   "bin": {
     "claudenav": "server.js"
