@@ -516,3 +516,17 @@
   .commit .sha { font-family: ui-monospace, monospace; color: var(--accent); }
   .commit .cmsg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .commit .cmeta { color: var(--muted); white-space: nowrap; }
+
+/* Full-text search hit: the matching passage from inside the conversation. */
+.s-hit { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-hit::before { content: ''; }
+
+/* "While you were away" strip: sessions that finished a turn since you last looked. */
+.away { margin: 12px 20px 0; padding: 10px 14px; background: var(--panel); border: 1px solid var(--accent); border-radius: 10px; }
+.away-head { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.away-head strong { color: var(--text); }
+.away-head button { margin-left: auto; }
+.away-row { display: flex; align-items: center; gap: 10px; padding: 6px 4px; cursor: pointer; border-top: 1px solid var(--border); }
+.away-row:hover { background: var(--panel2); }
+.away-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.away-proj { color: var(--muted); font-size: 12px; white-space: nowrap; }

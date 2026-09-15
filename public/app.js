@@ -207,7 +207,29 @@ async function openTerminal(payload) {
 function matchesQuery(s, p, q) {
   if (!q) return true;
   const hay = (s.title + ' ' + s.lastPrompt + ' ' + p.cwd + ' ' + s.gitBranch).toLowerCase();
-  return hay.includes(q);
+  return hay.includes(q) || searchHits.has(s.sessionId);
+}
+
+// Full-text hits from /api/search (session id -> snippet), keyed by the query
+// they answer. The row metadata match above is instant; this arrives a beat
+// later (debounced) and widens the result set to "anything said in the chat".
+let searchHits = new Map(), searchHitsFor = '', searchTimer = null, searchSeq = 0;
+function scheduleSearch() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  clearTimeout(searchTimer);
+  if (q.length < 2) { if (searchHits.size) { searchHits = new Map(); searchHitsFor = ''; } return; }
+  if (q === searchHitsFor) return;
+  searchTimer = setTimeout(async () => {
+    const seq = ++searchSeq;
+    try {
+      const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+      const j = await r.json();
+      if (seq !== searchSeq) return; // a newer query superseded this one
+      searchHits = new Map((j.hits || []).map(h => [h.sessionId, h.snippet]));
+      searchHitsFor = q;
+      render();
+    } catch {}
+  }, 250);
 }
 
 function render() {
@@ -287,6 +309,7 @@ function render() {
         <div class="s-main">
           <div class="s-title">${esc(s.title)} <span class="mode-badge ${modeOf(s) === 'plan' ? 'plan' : ''}" title="Permission mode for the next ClaudeNav turn${s.modeOverride ? ' (pinned)' : ''}">${esc(MODE_LABEL[modeOf(s)] || modeOf(s))}</span>${s.modelOverride ? `<span class="mode-badge model" title="Model pinned for the next ClaudeNav turn">${esc(modelLabel(s.modelOverride))}</span>` : ''}</div>
           <div class="s-sub">${s.gitBranch ? '⎇ ' + esc(s.gitBranch) + ' · ' : ''}${esc(s.lastPrompt) || '<em>no prompt</em>'}</div>
+          ${searching && searchHits.has(s.sessionId) ? `<div class="s-hit" title="Matched inside the conversation">🔍 ${esc(searchHits.get(s.sessionId))}</div>` : ''}
           ${hint}
         </div>
         <div class="s-meta ${tier}" title="${tokTip}">
@@ -296,7 +319,8 @@ function render() {
           <span class="ctxbar ${tier}"><i style="width:${ctxPct}%"></i></span>
         </div>
         <div class="s-actions">
-          <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}">Resume ▸</button>
+          <button class="primary" data-chat="${esc(s.sessionId)}" title="Continue this session here in the browser (headless turns — no terminal)">💬 Chat</button>
+          <button data-resume="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}" title="Resume this session in a terminal window">Resume ▸</button>
           <button data-copy="${esc(s.sessionId)}" data-cwd="${esc(s.cwd || p.cwd)}" title="Copy resume command">⧉</button>
           <button data-link="${esc(s.sessionId)}" title="Copy a link that opens this session">🔗</button>
           <button data-archive="${esc(s.sessionId)}" data-archived="${s.archived ? '1' : '0'}" title="${s.archived ? 'Unarchive — show this session in the normal list again' : 'Archive — hide this session from the list (stays searchable and resumable)'}">${s.archived ? '⤴ Unarchive' : '🗄'}</button>
@@ -410,6 +434,7 @@ document.getElementById('content').addEventListener('click', e => {
     else if (btn.dataset.handover) doHandover(btn.dataset.handover);
     else if (btn.dataset.compact) doCompact(btn.dataset.compact, btn.dataset.cwd);
     else if (btn.dataset.newsession) openIsolated(btn.dataset.newsession, btn.dataset.newname || btn.dataset.newsession);
+    else if (btn.dataset.chat) openChat(btn.dataset.chat);
     else if (btn.dataset.resume) openTerminal({ cwd: btn.dataset.cwd, sessionId: btn.dataset.resume });
     else if (btn.dataset.copy) {
       const cmd = `cd ${JSON.stringify(btn.dataset.cwd)} && claude --resume ${btn.dataset.copy}`;
@@ -699,6 +724,19 @@ function notifyReady() {
   } catch {}
 }
 
+// Desktop notification when Claude stops to ask you something (background tab only).
+function notifyQuestion() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (document.hasFocus()) return;
+  try {
+    const n = new Notification('❓ Claude has a question', {
+      body: (chat.name || 'A Claude session') + ' is waiting for your answer.',
+      tag: 'claudenav-ask-' + chat.sessionId,
+    });
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch {}
+}
+
 function ensureNotifyPermission() {
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission().catch(() => {});
@@ -902,6 +940,7 @@ function refreshAsks() {
     if (!live.dataset.seen) {
       live.dataset.seen = '1';
       requestAnimationFrame(() => live.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      notifyQuestion();
     }
   }
 }
@@ -1440,6 +1479,7 @@ async function load() {
     const r = await fetch('/api/sessions');
     DATA = await r.json();
     refreshKnownSessions();
+    trackTransitions();
     render();
     if (dashOpen()) renderDashboard(); // keep the open dashboard live with the 5s poll
     handleVersion(DATA.version);
@@ -1460,6 +1500,57 @@ async function load() {
   }
 }
 let lastLoadErrorToast = 0;
+
+// --- "While you were away" -----------------------------------------------------
+// Sessions whose turn finished (working -> anything else) since you last looked.
+// Recorded on every poll for sessions you weren't watching in the open chat, or
+// while the window wasn't focused; shown as a dismissable strip above the list
+// and (if permitted) as a desktop notification. Dismiss clears the strip.
+const prevStatus = new Map(); // sessionId -> last seen status
+let awayEvents = [];          // [{ sessionId, title, project, status, at }]
+function trackTransitions() {
+  const focusedOnIt = (id) => chat.sessionId === id && document.hasFocus()
+    && document.getElementById('overlay').classList.contains('show');
+  for (const p of DATA.projects) for (const s of p.sessions) {
+    const prev = prevStatus.get(s.sessionId);
+    prevStatus.set(s.sessionId, s.status);
+    if (prev !== 'working' || s.status === 'working') continue;
+    if (focusedOnIt(s.sessionId)) continue;
+    awayEvents = awayEvents.filter(e => e.sessionId !== s.sessionId);
+    awayEvents.unshift({ sessionId: s.sessionId, title: s.title, project: p.name, status: s.status, at: Date.now() });
+    if (chat.sessionId !== s.sessionId) notifySession(s, p);
+  }
+  if (awayEvents.length > 12) awayEvents.length = 12;
+  renderAway();
+}
+function renderAway() {
+  const el = document.getElementById('away');
+  if (!el) return;
+  if (!awayEvents.length) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="away-head"><strong>While you were away</strong> — ${awayEvents.length} session${awayEvents.length > 1 ? 's' : ''} finished a turn
+      <button id="awayDismiss" title="Clear this list">Dismiss</button></div>` +
+    awayEvents.map(e => `<div class="away-row" data-session="${esc(e.sessionId)}" title="Open this session">
+      <span class="light ${esc(e.status)}"></span>
+      <span class="pill ${esc(e.status)}">${esc(STATUS_LABEL[e.status] || e.status)}</span>
+      <span class="away-title">${esc(e.title)}</span>
+      <span class="away-proj">${esc(e.project)} · ${timeAgo(e.at)}</span>
+    </div>`).join('');
+  el.querySelector('#awayDismiss').onclick = () => { awayEvents = []; renderAway(); };
+  el.querySelectorAll('.away-row').forEach(r => r.onclick = () => {
+    awayEvents = awayEvents.filter(e => e.sessionId !== r.dataset.session); renderAway(); openChat(r.dataset.session);
+  });
+}
+// Desktop notification for a session finishing while you weren't watching it.
+function notifySession(s, p) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification((STATUS_LABEL[s.status] || 'Finished') + ' — ' + (p.name || 'session'), {
+      body: s.title, tag: 'claudenav-' + s.sessionId,
+    });
+    n.onclick = () => { window.focus(); openChat(s.sessionId); n.close(); };
+  } catch {}
+}
 
 // --- Usage limits ------------------------------------------------------------
 // Mirrors Claude Code's /usage menu: a compact row of bars for the current
@@ -1627,19 +1718,44 @@ function renderHk() {
   document.getElementById('hkSub').textContent =
     `${counts.clean} safe · ${counts.dirty} unsaved · ${counts.unpushed} unpushed · ${counts.busy} busy`;
   const wrappable = d.repos.filter(r => r.verdict !== 'busy').length;
+  const unsaved = d.repos.filter(r => r.verdict === 'dirty').length;
   const body = document.getElementById('hkBody');
   body.innerHTML =
     `<div class="hk-bulk">
        <button class="primary" id="wrapAll" ${wrappable ? '' : 'disabled'}>▶ Wrap up ${wrappable} safe-candidate folder${wrappable !== 1 ? 's' : ''}</button>
        <span class="hint">enquires each session, saves &amp; pushes, then closes — work-in-progress is left open</span>
+     </div>
+     <div class="hk-bulk">
+       <button id="commitAll" ${unsaved ? '' : 'disabled'} title="Commit every folder with uncommitted changes (no push, no close). Busy folders are skipped.">💾 Commit all unsaved (${unsaved})</button>
+       <span class="hint">just saves — nothing is pushed or closed</span>
      </div>`
     + (d.repos.map(repoHtml).join('') || '<div class="empty">No sessions.</div>');
   body.querySelector('#wrapAll')?.addEventListener('click', wrapAll);
+  body.querySelector('#commitAll')?.addEventListener('click', commitAll);
   body.querySelectorAll('button[data-commit]').forEach(b => b.onclick = () => doCommit(b.dataset.commit, b.dataset.name));
   body.querySelectorAll('button[data-push]').forEach(b => b.onclick = () => doPush(b.dataset.push));
   body.querySelectorAll('button[data-assess]').forEach(b => b.onclick = () => doAssess(b.dataset.assess));
   body.querySelectorAll('button[data-close]').forEach(b => b.onclick = () => doClose(b.dataset.close, b.dataset.name));
   body.querySelectorAll('button[data-merge]').forEach(b => b.onclick = () => doMerge(b.dataset.merge, b.dataset.name));
+}
+
+// Commit every dirty, non-busy repo in turn (sequential — each is a git call
+// plus a re-scan). Uses the same per-folder doCommit path as the row button.
+async function commitAll() {
+  const targets = HK.repos.filter(r => r.verdict === 'dirty');
+  if (!targets.length) return;
+  if (!confirm(`Commit uncommitted changes in ${targets.length} folder${targets.length > 1 ? 's' : ''}?\n\n${targets.map(r => '• ' + r.name).join('\n')}\n\nNothing is pushed or closed.`)) return;
+  const msg = prompt('One commit message for all of them:', 'checkpoint (ClaudeNav wrap-up)');
+  if (msg === null) return;
+  const btn = document.getElementById('commitAll');
+  if (btn) { btn.disabled = true; btn.textContent = 'Committing…'; }
+  let ok = 0, failed = 0;
+  for (const r of targets) {
+    try { await api('/api/commit', { cwd: r.cwd, message: msg }); setRes(r.cwd, 'ok', 'Committed'); ok++; }
+    catch (e) { setRes(r.cwd, 'err', 'Commit failed: ' + e.message); failed++; }
+  }
+  toast(`Committed ${ok} folder${ok !== 1 ? 's' : ''}${failed ? ` · ${failed} failed` : ''}`, failed > 0);
+  loadHousekeeping();
 }
 
 async function doMerge(wtPath, name) {
@@ -2231,7 +2347,7 @@ document.getElementById('hkOverlay').addEventListener('click', e => { if (e.targ
 document.getElementById('vizClose').addEventListener('click', closeViz);
 document.getElementById('vizOverlay').addEventListener('click', e => { if (e.target.id === 'vizOverlay') closeViz(); });
 
-document.getElementById('search').addEventListener('input', render);
+document.getElementById('search').addEventListener('input', () => { scheduleSearch(); render(); });
 document.getElementById('refresh').addEventListener('click', load);
 document.getElementById('updateBtn').addEventListener('click', doUpdate);
 const showStaleBox = document.getElementById('showStale');

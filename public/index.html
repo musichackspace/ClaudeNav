@@ -10,7 +10,7 @@
 <body>
 <header>
   <h1>Claude<span>Nav</span></h1>
-  <input id="search" type="search" placeholder="Search title, prompt, path, branch…" />
+  <input id="search" type="search" placeholder="Search title, prompt, path, branch — or anything said in a chat…" />
   <div class="grow"></div>
   <label class="meta">Open in
     <select id="termApp">
@@ -31,6 +31,7 @@
 </header>
 <main>
   <div id="folders" class="folders"></div>
+  <div id="away" class="away" hidden></div>
   <div id="content"><div class="empty">Loading sessions…</div></div>
 </main>
 

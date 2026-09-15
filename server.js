@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { HOST, PORT, PROJECTS_DIR, PUBLIC_DIR, UPLOADS_DIR } = require('./lib/config');
 const { claudeSetupHelp } = require('./lib/bins');
-const { findSessionFile, parseTranscript } = require('./lib/transcripts');
+const { findSessionFile, parseTranscript, searchSessions } = require('./lib/transcripts');
 const { openTerminal, openUrl } = require('./lib/live');
 const { setArchived, setSessionMode, setSessionModel } = require('./lib/state');
 const { modelsInfo, usageInfo } = require('./lib/account');
@@ -115,8 +115,18 @@ function csrfReject(req) {
   return null;
 }
 
+// Requests slower than this are logged (method, path, status, ms). The server
+// is single-threaded, so a slow route is what stalls the poll and, past the
+// watchdog's budget, gets the process killed — this makes the culprit visible.
+const SLOW_MS = Number(process.env.CLAUDENAV_SLOW_MS) || 200;
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
+  const t0 = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - t0;
+    if (ms >= SLOW_MS) console.log(`[claudenav] slow ${req.method} ${url.pathname} ${res.statusCode} ${ms}ms`);
+  });
 
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   {
@@ -137,6 +147,11 @@ const server = http.createServer((req, res) => {
       return sendJSON(res, 200, data);
     }
     catch (e) { return sendJSON(res, 500, { error: e.message }); }
+  }
+
+  if (url.pathname === '/api/search') {
+    const q = url.searchParams.get('q') || '';
+    return searchSessions(q).then(r => sendJSON(res, 200, r), e => sendJSON(res, 500, { error: e.message }));
   }
 
   if (url.pathname === '/api/version') {
