@@ -10,12 +10,40 @@ shows live status, and lets you chat with / wrap up sessions from the browser.
 
 ## Layout
 
-- `server.js` — the whole backend. Node, no dependencies, binds `127.0.0.1:4317`.
-  Parses session transcripts (mtime-cached), detects live terminals via
-  `ps`+`lsof`, and exposes the API below.
-- `public/index.html` — the entire frontend (HTML + CSS + JS in one file,
-  including a small hand-rolled Markdown renderer).
-- No build step. Node 18+. Terminal-opening features are macOS-only (AppleScript).
+- `server.js` — HTTP routes, the CSRF guard, static serving, boot. Node, no
+  dependencies, binds `127.0.0.1:4317`. The logic lives in `lib/` (plain
+  CommonJS, no build step; dependency order top to bottom, no cycles):
+  - `lib/config.js` — paths and ports every module shares.
+  - `lib/gitutil.js` — `git()` / `gitTry()` / `gitOk()` wrappers.
+  - `lib/bins.js` — finding the `claude` and `gh` binaries; the setup-help text.
+  - `lib/transcripts.js` — incremental transcript parsing (`parseSessionFile`)
+    and the conversation view (`parseTranscript`).
+  - `lib/live.js` — live terminal detection (`ps`+`lsof`, cached) and opening
+    terminals/URLs per platform.
+  - `lib/state.js` — per-session choices persisted under `~/.claude`: permission
+    mode, model, archived flag.
+  - `lib/account.js` — usage bars and the model list (OAuth token, background
+    refresh).
+  - `lib/turns.js` — headless turns: attachments, per-session queue, detached
+    spawn, log tailing, error classification, reattach on boot. Exposes
+    `onIdle(fn)` so `version.js` can hook the deferred relaunch without a cycle.
+  - `lib/version.js` — self-version, upstream check, exit-42 relaunch.
+  - `lib/sessions.js` — `/api/sessions` assembly: status classification, grouping.
+  - `lib/repos.js` — git on session repos: housekeeping, history, worktrees,
+    commit/push, browse/mkdir/init.
+  - `lib/sites.js` — the website wizard: `gh`, Pages, site status, publish, merge.
+  - `lib/wrap.js` — assess / handover / close.
+- `public/index.html` (markup) + `public/app.css` + `public/app.js` (the app)
+  + `public/markdown.js` (the hand-rolled Markdown renderer, also `require`d by
+  the tests). Loaded as plain `<script src>` tags — still no build step.
+- `test/*.test.js` — `npm test` (`node --test`, Node 18+, no dependencies). Each
+  file points `HOME` at a throwaway dir before requiring `server.js`, which only
+  listens when run directly. CI runs them on push/PR (`.github/workflows/test.yml`).
+- `src-tauri/` — the desktop shell. It bundles `server.js`, `lib/` and `public/`
+  as resources (`tauri.conf.json`), so a new top-level file the server needs
+  must be added there too.
+- Node 18+. Terminal-opening features work on macOS (AppleScript), Windows and
+  Linux (see `/api/open`).
 
 ## Run
 

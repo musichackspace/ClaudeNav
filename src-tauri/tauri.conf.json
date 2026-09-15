@@ -24,6 +24,7 @@
     ],
     "resources": {
       "../server.js": "server.js",
+      "../lib": "lib",
       "../public": "public"
     }
   }
