@@ -113,6 +113,20 @@ function freshAcc() {
   };
 }
 
+// Claude Code injects machine-generated blocks into `user` records — background
+// task updates (`<task-notification>`) and injected context (`<system-reminder>`).
+// They're type:"user" with plain-string content and no isMeta flag, so anything
+// that treats "user record with text" as "a human said this" shows them verbatim.
+// Crucially they aren't always their own message: a notification is often
+// *appended to* real prose the user typed ("Why do I keep seeing this? <task-
+// notification>…"), so this strips the blocks in place rather than dropping the
+// whole message — the caller decides what an empty remainder means.
+const INJECTED_BLOCK_RE = /<(task-notification|system-reminder)>[\s\S]*?<\/\1>/g;
+function stripInjectedBlocks(text) {
+  if (typeof text !== 'string' || text.indexOf('<') === -1) return text;
+  return text.replace(INJECTED_BLOCK_RE, '').trim();
+}
+
 // Fold one transcript line into the accumulator. Order-dependent (later records
 // overwrite earlier ones), which is exactly why the incremental path may only
 // append newer lines — never re-fold or skip out of order.
@@ -141,11 +155,11 @@ function foldLine(a, line) {
     case 'user': {
       a.userMsgCount++;
       const c = o.message && o.message.content;
-      const text = typeof c === 'string'
+      const text = stripInjectedBlocks(typeof c === 'string'
         ? c
         : Array.isArray(c)
           ? c.filter(p => p && p.type === 'text').map(p => p.text).join(' ')
-          : null;
+          : null);
       const isToolResult = Array.isArray(c) && c.length
         && c.every(p => p && p.type === 'tool_result');
       // Many "user" records aren't a human taking a turn: tool results, hook
@@ -733,11 +747,11 @@ function parseTranscript(filePath) {
     const m = o.message;
     if (o.type === 'user' && m) {
       const c = m.content;
-      let text = typeof c === 'string'
+      let text = stripInjectedBlocks(typeof c === 'string'
         ? c
         : Array.isArray(c)
           ? c.filter(p => p && p.type === 'text').map(p => p.text).join('\n')
-          : '';
+          : '');
       // Tool results ride in on (otherwise skipped) user messages — attach each
       // back to the tool_use that produced it so the UI can show the output.
       if (Array.isArray(c)) {
