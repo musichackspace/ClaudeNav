@@ -308,12 +308,12 @@
     width: min(560px, 100%); background: var(--bg); border-left: 1px solid var(--border);
     display: flex; flex-direction: column; height: 100%;
   }
-  .chat-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: flex-start; }
+  .chat-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 10px; align-items: flex-start; flex-shrink: 0; max-height: 40vh; overflow: hidden; }
   .chat-head .ct { flex: 1; min-width: 0; }
   .statuslight { display: flex; flex-direction: column; align-items: center; gap: 4px; padding-top: 2px; }
   .statuslight .light { width: 16px; height: 16px; }
   #chatLightLabel { font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); white-space: nowrap; }
-  .chat-head .ctitle { font-weight: 600; }
+  .chat-head .ctitle { font-weight: 600; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; word-break: break-word; }
   .chat-head .csub { color: var(--muted); font-size: 12px; }
   .mode-pick { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); white-space: nowrap; }
   .mode-pick select { font-size: 12px; text-transform: none; letter-spacing: 0; background: var(--panel2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; cursor: pointer; }
@@ -322,7 +322,7 @@
   .mode-badge.plan { border-color: #58a6ff; color: #58a6ff; }
   .mode-badge.model { margin-left: 4px; border-color: #d2a8ff; color: #d2a8ff; }
   .chat-close { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; padding: 0 4px; }
-  .chat-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px; }
+  .chat-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px; }
   .msg { margin-bottom: 14px; }
   .msg .who { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 3px; }
   .msg.user .bubble { background: var(--panel2); }
@@ -1401,6 +1401,7 @@ function openChat(id) {
   setChatLight(s.status === 'working' ? 'working' : s.status === 'interrupted' ? 'interrupted' : 'waiting',
     s.status === 'working' ? 'Working' : 'Ready');
   document.getElementById('chatTitle').textContent = s.title;
+  document.getElementById('chatTitle').title = s.title;
   document.getElementById('chatSub').textContent =
     `${p.name} · ${STATUS_LABEL[s.status] || s.status}` + (s.gitBranch ? ` · ⎇ ${s.gitBranch}` : '');
   document.getElementById('chatBody').innerHTML = '<div class="empty">Loading conversation…</div>';
@@ -1433,6 +1434,7 @@ function openNewChat(cwd, name) {
   chat.name = 'New session · ' + name;
   setChatLight('waiting', 'Ready');
   document.getElementById('chatTitle').textContent = 'New session';
+  document.getElementById('chatTitle').title = '';
   document.getElementById('chatSub').textContent = `${name} · type a message to start`;
   document.getElementById('chatBody').innerHTML =
     '<div class="empty">New headless session in this folder.<br>Send a message to begin — no terminal needed.</div>';
