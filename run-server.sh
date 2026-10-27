@@ -8,10 +8,20 @@ MAX_CRASHES=3
 WINDOW=60
 fails=0
 window_start=$SECONDS
+# Take the server down with us. The LaunchAgent sets AbandonProcessGroup (so
+# detached headless turns survive a restart), which also means launchd does NOT
+# kill node when it stops this script — a `kickstart -k` used to orphan the
+# running server.js, which kept the port forever while every fresh launch
+# crash-looped on EADDRINUSE. Run node in the background and forward the signal.
+child=""
+trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null && wait "$child"; echo "=== $(date '"'"'+%Y-%m-%d %H:%M:%S'"'"') run-server.sh stopped (signal) ===" >> "$LOG"; exit 0' TERM INT HUP
 while true; do
   echo "=== $(date '+%Y-%m-%d %H:%M:%S') starting server.js ===" >> "$LOG"
-  node server.js >> "$LOG" 2>&1
+  node server.js >> "$LOG" 2>&1 &
+  child=$!
+  wait "$child"
   code=$?
+  child=""
   echo "=== $(date '+%Y-%m-%d %H:%M:%S') server.js exited (code $code) ===" >> "$LOG"
   [ "$code" -eq 0 ] && break
   # Code 42 = the server asked to relaunch (in-app update). Restart immediately

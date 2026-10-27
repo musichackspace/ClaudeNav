@@ -2274,6 +2274,18 @@ function renderDashboard() {
   h += `<div class="dash-sec"><h3>In progress now</h3>${
     working.length ? working.map(dashRow).join('') : '<div class="dash-empty">Nothing running.</div>'}</div>`;
 
+  // Recently finished: a turn that ended cleanly without asking you anything is
+  // 'idle', so it fell out of both sections above the moment it completed — the
+  // session seemed to vanish. Keep the last day's finished work in view. Ranked
+  // by the last real message (lastTs), not file mtime, which background writes
+  // (e.g. an old open terminal appending a summary) bump without new activity.
+  const lastAt = s => Date.parse(s.lastTs) || s.mtimeMs || 0;
+  const finished = active.filter(x => x.s.status === 'idle' && Date.now() - lastAt(x.s) < 24 * 3600 * 1000)
+    .sort((a, b) => lastAt(b.s) - lastAt(a.s)).slice(0, 8);
+  if (finished.length) {
+    h += `<div class="dash-sec"><h3>Recently finished</h3>${finished.map(dashRow).join('')}</div>`;
+  }
+
   // Context heavy: sessions past the warn threshold, fullest first.
   const heavy = active.map(x => {
     const ctxTok = x.s.contextTokens || 0;

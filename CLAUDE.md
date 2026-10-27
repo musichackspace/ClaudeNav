@@ -56,6 +56,19 @@ relaunch — so committing is enough to deploy; no UI click needed. A healthy
 check is a silent no-op; a restart logs to `/tmp/claudenav.log`. `uninstall`
 removes both agents.
 
+> **Orphaned servers.** `AbandonProcessGroup` (needed so detached turns survive
+> a restart) also means launchd won't kill `node` when it stops `run-server.sh`.
+> So `run-server.sh` runs node in the background and **forwards TERM/INT/HUP**
+> to it — before that, every `kickstart -k` orphaned the serving `server.js`
+> (ppid 1), which held the port for days while each fresh launch crash-looped
+> on EADDRINUSE and every later kickstart killed only the copy that wasn't
+> serving. As a backstop the watchdog detects an orphan (listener on the port
+> with ppid 1, `node server.js`, cwd = this repo) and retires it via
+> `/api/update {pull:false}` (graceful, deferred while turns run; SIGTERM if it
+> won't answer). It also skips kickstarting within 2 min of a wake
+> (`kern.waketime`): macOS maintenance "dark wakes" throttle the server and
+> caused ~5–10 false "unreachable" restarts a day.
+
 > **Do NOT rely on `nohup … & disown` when launched from inside a tool wrapper.**
 > Processes spawned by a tool call (incl. via `nohup`/`disown`/`setsid`) get
 > SIGTERM'd after ~90s — the server's shutdown handler then exits 0, so it looks

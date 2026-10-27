@@ -39,6 +39,26 @@ while [ "$attempt" -lt "$RETRIES" ]; do
   [ "$attempt" -lt "$RETRIES" ] && sleep "$RETRY_GAP"
 done
 
+# Orphaned server: a `node server.js` from THIS repo that's been reparented to
+# launchd (ppid 1) yet isn't the LaunchAgent's own child holds the port, so every
+# real launch crash-loops on EADDRINUSE and our kickstarts only ever kill the
+# copy that isn't serving. (run-server.sh now forwards SIGTERM so this shouldn't
+# recur, but an older launcher could still leave one behind.) Retire it with the
+# server's own graceful relaunch — deferred until no turn is in flight, and
+# detached turns survive anyway — and launchd's waiting instance binds the port.
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+listener=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1)
+if [ -n "$listener" ] && [ "$(ps -o ppid= -p "$listener" | tr -d ' ')" = "1" ] \
+   && ps -o command= -p "$listener" | grep -q 'node server.js' \
+   && [ "$(lsof -a -p "$listener" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" = "$REPO_DIR" ]; then
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S') watchdog: orphaned server.js (pid $listener) holds :$PORT — asking it to step aside ===" >> "$LOG"
+  if ! curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+       -d '{"pull":false}' "http://$HOST:$PORT/api/update" >/dev/null 2>>"$LOG"; then
+    kill -TERM "$listener" 2>/dev/null   # unresponsive orphan: graceful SIGTERM
+  fi
+  exit 0
+fi
+
 if [ -n "$probe_ok" ]; then
   # Reachable — but is it stale? A commit on disk that the running process
   # predates shows up as head != bootHead (the UI's manual "relaunch" case).
@@ -53,6 +73,15 @@ if [ -n "$probe_ok" ]; then
     curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
       -d '{"pull":false}' "http://$HOST:$PORT/api/update" >/dev/null 2>>"$LOG"
   fi
+  exit 0
+fi
+
+# Just woke (incl. a brief maintenance "dark wake"): processes are still
+# throttled, so a failed probe is noise, not a hang. These were ~5-10 false
+# kickstarts a day. Skip this round; the next run re-checks.
+waketime=$(sysctl -n kern.waketime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\),.*/\1/p')
+if [ -n "$waketime" ] && [ $(( $(date +%s) - waketime )) -lt 120 ]; then
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S') watchdog: $HOST:$PORT unreachable, but the Mac woke <2 min ago — not restarting yet ===" >> "$LOG"
   exit 0
 fi
 

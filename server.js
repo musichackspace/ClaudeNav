@@ -473,7 +473,10 @@ function buildData() {
       let s;
       try { s = parseSessionFile(fp, st); } catch { continue; }
 
-      const sessionCwd = s.cwd || dir;
+      // Group by the *launch* dir, not the latest record's cwd: Claude can `cd`
+      // into a subfolder mid-session, and grouping on that made the session
+      // vanish from its project into a phantom one (e.g. "vitals/out").
+      const sessionCwd = s.firstCwd || s.cwd || dir;
       // Worktree sessions live at <parent>/.claude/worktrees/<leaf>. Fold them
       // back under their parent project so they appear at the top of that
       // project's session list rather than as a separate top-level folder.
@@ -497,7 +500,11 @@ function buildData() {
   // Sort sessions within each project (newest first) and flag the live one.
   const result = [];
   for (const p of projects.values()) {
-    p.sessions.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    // Newest *conversation* first. File mtime alone gets bumped by background
+    // writes (an old open terminal appending a summary line) and buried
+    // genuinely new sessions under weeks-old ones.
+    const lastAt = s => Date.parse(s.lastTs) || s.mtimeMs || 0;
+    p.sessions.sort((a, b) => lastAt(b) - lastAt(a));
     // Heuristic: if the project has live terminals, the most-recently-touched
     // sessions are the ones likely open right now.
     p.sessions.forEach((s, i) => {
