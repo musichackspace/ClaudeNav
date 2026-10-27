@@ -109,6 +109,15 @@ removes both agents.
   `unzip -p` — best-effort, layout/formulas dropped). Both need the macOS
   built-ins; extraction failures fall back to a placeholder note. Unsupported
   types are rejected client-side with a warning toast.
+  **No wall-clock limit on chat turns**: the old fixed 15-min
+  `TURN_TIMEOUT_MS` cut off 10 long-but-healthy turns in a month (the terminal
+  has no such cap). `armStallGuard` instead stops a turn only after
+  `CLAUDENAV_TURN_IDLE_MS` (default 60 min) with no activity — stream/stderr
+  logs, transcript, or `<session>/subagents/*` writes (a long Task leaves the
+  parent quiet) — checked ≤ once a minute. Hard cap opt-in via
+  `CLAUDENAV_TURN_MAX_MS` (legacy `CLAUDE_TURN_TIMEOUT_MS` also honored). The
+  stop surfaces as kind `interrupted` (gentle "send again" UI). Assess/handover
+  one-shots keep the plain 15-min `TURN_TIMEOUT_MS`.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
   usageLimited, needsSetup, interrupted, partial}`. `partial` is the in-flight
   assistant output (`{text, tools}`, block-level — the CLI doesn't stream tokens)

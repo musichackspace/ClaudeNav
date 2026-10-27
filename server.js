@@ -992,7 +992,16 @@ function effectiveMode(sessionId) {
   return 'bypassPermissions';
 }
 
+// One-shot helper calls (assess / handover brief) keep a plain wall-clock cap.
 const TURN_TIMEOUT_MS = Number(process.env.CLAUDE_TURN_TIMEOUT_MS) || 15 * 60 * 1000;
+// Chat turns do NOT: a fixed 15-min cap silently killed long-but-healthy turns
+// (10 in a month — a terminal session has no such limit). Instead a turn is
+// stopped only when it goes quiet: no new stream output, stderr, transcript or
+// subagent-transcript write for TURN_IDLE_MS. A wall-clock cap is opt-in via
+// CLAUDENAV_TURN_MAX_MS (or the legacy CLAUDE_TURN_TIMEOUT_MS, if set).
+const TURN_IDLE_MS = Number(process.env.CLAUDENAV_TURN_IDLE_MS) || 60 * 60 * 1000;
+const TURN_MAX_MS = Number(process.env.CLAUDENAV_TURN_MAX_MS) || Number(process.env.CLAUDE_TURN_TIMEOUT_MS) || 0;
+const STALL_CHECK_MS = Math.min(60 * 1000, Math.max(1000, TURN_IDLE_MS / 4));
 
 const runningChats = new Map(); // sessionId -> turn entry (see spawnTurn / reattachTurn)
 const chatQueues = new Map();   // sessionId -> [{text, cwd}, ...] turns waiting their turn
@@ -1476,12 +1485,40 @@ function spawnTurn(sessionId, text, cwd, mode, model) {
   child.on('error', err => finalizeTurn(sessionId, err));
   child.on('exit', code => finalizeTurn(sessionId, code === 0 ? null : new Error('claude exited with code ' + code)));
   e.tailTimer = setInterval(() => tick(sessionId), TAIL_MS);
-  e.timer = setTimeout(() => {
+  armStallGuard(sessionId, e);
+}
+
+// Most recent sign of life for a turn: its stream/stderr logs, its transcript,
+// and any subagent transcripts (a long Task can leave the parent quiet).
+function lastActivityAt(sessionId, e) {
+  let t = e.startedAt;
+  const see = fp => { try { t = Math.max(t, fs.statSync(fp).mtimeMs); } catch {} };
+  see(e.outFile); see(e.errFile);
+  if (!e.transcript) e.transcript = findSessionFile(sessionId);
+  if (e.transcript) {
+    see(e.transcript);
+    const sub = path.join(e.transcript.replace(/\.jsonl$/, ''), 'subagents');
+    try { for (const f of fs.readdirSync(sub)) see(path.join(sub, f)); } catch {}
+  }
+  return t;
+}
+
+// Stop a turn only if it has stalled (or exceeded an opt-in hard cap). Checked
+// once a minute — cheap (a few stats) and off the 5s /api/sessions hot path.
+function armStallGuard(sessionId, e) {
+  e.timer = setInterval(() => {
+    const now = Date.now();
+    const overCap = TURN_MAX_MS > 0 && now - e.startedAt > TURN_MAX_MS;
+    const stalled = now - lastActivityAt(sessionId, e) > TURN_IDLE_MS;
+    if (!overCap && !stalled) return;
+    clearInterval(e.timer);
     e.killed = true;
-    lastChatError.set(sessionId, 'turn timed out and was stopped');
-    lastChatErrorKind.delete(sessionId);
+    lastChatError.set(sessionId, overCap
+      ? `This turn hit the ${Math.round(TURN_MAX_MS / 60000)}-minute limit and was stopped. Progress so far is saved — send again to continue.`
+      : `This turn went silent for ${Math.max(1, Math.round(TURN_IDLE_MS / 60000))} minutes and was stopped as stuck. Progress so far is saved — send again to continue.`);
+    lastChatErrorKind.set(sessionId, 'interrupted'); // gentle UI treatment, no "Turn error:" prefix
     killEntry(e);
-  }, TURN_TIMEOUT_MS);
+  }, STALL_CHECK_MS);
 }
 
 function drainQueue(sessionId) {
@@ -1512,14 +1549,7 @@ function reattachTurn(sessionId, r) {
   // rather than waiting on a pid that may have been recycled.
   if (e.sawResult) return finalizeTurn(sessionId, null, { interrupted: true });
   e.tailTimer = setInterval(() => tick(sessionId), TAIL_MS);
-  const left = Math.max(30 * 1000, TURN_TIMEOUT_MS - (Date.now() - e.startedAt));
-  e.timer = setTimeout(() => {
-    e.killed = true;
-    lastChatError.set(sessionId, 'turn timed out and was stopped');
-    lastChatErrorKind.delete(sessionId);
-    killEntry(e);
-    finalizeTurn(sessionId, null);
-  }, left);
+  armStallGuard(sessionId, e);
 }
 
 // On boot, rediscover in-flight turns and the queue a previous process left

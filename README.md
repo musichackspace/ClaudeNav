@@ -187,8 +187,11 @@ Attached images render inline in the transcript.
   count if you've lined up more.
 - **Send as many as you like** — turns for one session run one-at-a-time in the
   order you sent them, so the transcript never gets two browser writers at once.
-- A hung turn is stopped after a timeout (`CLAUDE_TURN_TIMEOUT_MS`, default 15
-  min) and in-flight turns are killed when the server stops.
+- **No time limit on a working turn** — like the terminal, a long task runs as
+  long as it needs. Only a turn that goes completely silent (no output,
+  transcript or subagent activity) for an hour is stopped as stuck
+  (`CLAUDENAV_TURN_IDLE_MS`); a hard cap is opt-in (`CLAUDENAV_TURN_MAX_MS`).
+  Turns keep running across a server restart and are reattached on boot.
 
 ### Using the browser and a terminal together
 
