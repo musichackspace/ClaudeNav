@@ -1499,7 +1499,12 @@ function spawnTurn(sessionId, text, cwd, mode, model) {
     // stdin ignored: a -p turn reads none, and an open stdin pipe makes the CLI
     // warn ("no stdin data received in 3s") and stall. detached:true makes the
     // child its own process-group leader so it survives our restart.
-    child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['ignore', outFd, errFd], detached: true });
+    // PYTHONUNBUFFERED: Python block-buffers stdout when it isn't a TTY, so a
+    // long script Claude runs (e.g. an API retry loop) showed nothing until it
+    // exited — Claude, and its background-task output file, saw no progress for
+    // minutes. Unbuffered output lets it watch progress as it happens.
+    child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['ignore', outFd, errFd], detached: true,
+      env: { ...process.env, PYTHONUNBUFFERED: process.env.PYTHONUNBUFFERED || '1' } });
   } catch (err) {
     try { if (outFd != null) fs.closeSync(outFd); } catch {}
     try { if (errFd != null) fs.closeSync(errFd); } catch {}
