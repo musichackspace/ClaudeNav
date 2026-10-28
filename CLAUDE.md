@@ -119,7 +119,17 @@ removes both agents.
   stop surfaces as kind `interrupted` (gentle "send again" UI). Assess/handover
   one-shots keep the plain 15-min `TURN_TIMEOUT_MS`.
 - `GET /api/chat-status?session=<id>` — `{running, queued, error, needsLogin,
-  usageLimited, needsSetup, interrupted, partial}`. `partial` is the in-flight
+  usageLimited, needsSetup, interrupted, partial, activity}`. `activity`
+  (`trackActivity`, from the stream's `system task_*` /
+  `background_tasks_changed` events) is `{startedAt, lastEventAt, replied,
+  tool:{name,detail,since}|null, background:[{id,description,since}]}` — it
+  drives the footer status line. Key case: a `-p` turn **stays alive after
+  replying while its background tasks run** (and replies again per task
+  notification), so `replied && background.length` means "done talking, waiting
+  on a background task — queued messages wait behind it"; Stop would kill that
+  task, so the UI confirms first. Reattach after a restart therefore finalizes
+  on pid exit only (not the first `result`), with `pidIsTurn` guarding pid
+  reuse. `partial` is the in-flight
   assistant output (`{text, tools}`, block-level — the CLI doesn't stream tokens)
   or `null`. `interrupted` is true when a turn was cut short by a server restart
   (its pid was gone on the next boot before it produced a terminal `result`); the

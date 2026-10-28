@@ -1694,18 +1694,51 @@ function renderAttachments() {
   });
 }
 
+// "4m 12s" / "35s" — elapsed time for the status line.
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`;
+}
+
+// Say what the turn is actually doing (from /api/chat-status `activity`), not
+// just "working": a silent multi-minute tool, or — the confusing one — Claude
+// has already replied and the turn is only waiting on a background task, with
+// your next message queued behind it until that task finishes.
+function describeActivity(a, queued) {
+  const q = queued > 0 ? ` · ${queued} message${queued > 1 ? 's' : ''} queued` : '';
+  if (!a) return '⏳ Claude is working…' + q;
+  const now = Date.now();
+  const bg = a.background || [];
+  const bgNote = bg.length ? ` · ${bg.length} background task${bg.length > 1 ? 's' : ''} running` : '';
+  if (a.replied && bg.length) {
+    const t = bg[0];
+    return `✓ Claude replied · waiting on background task: ${t.description} (${fmtDur(now - t.since)})`
+      + (bg.length > 1 ? ` +${bg.length - 1} more` : '')
+      + (queued > 0 ? ` · your message will be sent when it finishes (Stop would kill the task and clear the queue)` : '');
+  }
+  if (a.tool) {
+    const quiet = now - a.lastEventAt;
+    return `⏳ Running ${a.tool.name}${a.tool.detail ? ': ' + a.tool.detail.slice(0, 60) : ''} · ${fmtDur(now - a.tool.since)}`
+      + (quiet > 60000 ? ' · no output yet' : '') + bgNote + q;
+  }
+  if (a.replied) return '⏳ Finishing up…' + q;
+  const quiet = now - a.lastEventAt;
+  return '⏳ Claude is thinking…' + (quiet > 20000 ? ` · last activity ${fmtDur(quiet)} ago` : '') + bgNote + q;
+}
+
 // Reflect server state: running + how many turns are queued behind it.
-function setStatus(running, queued) {
+function setStatus(running, queued, activity) {
   const was = chat.running;
   chat.running = running;
+  chat.activity = running ? (activity || null) : null;
   const w = document.getElementById('working');
-  if (w) w.textContent = running
-    ? '⏳ Claude is working…' + (queued > 0 ? ` (${queued} queued)` : '')
-    : '';
+  if (w) { w.textContent = running ? describeActivity(activity, queued) : ''; w.title = w.textContent; }
   const stop = document.getElementById('stopBtn');
   if (stop) stop.hidden = !running;
   if (running) {
-    setChatLight('working', queued > 0 ? `Working · ${queued} queued` : 'Working');
+    const waitingBg = activity && activity.replied && (activity.background || []).length;
+    setChatLight('working', waitingBg ? 'Replied · background task running'
+      : queued > 0 ? `Working · ${queued} queued` : 'Working');
     setTabSignal('working');
   } else {
     setChatLight('waiting', 'Ready');
@@ -1868,6 +1901,11 @@ function clearStreaming() {
 
 async function doStop() {
   if (!chat.sessionId) return;
+  // Stopping kills background work too (it's a child of the turn's process) —
+  // say so before doing it, since that work is often the whole point.
+  const bg = (chat.activity && chat.activity.background) || [];
+  if (bg.length && !confirm(`Stop the turn? This also kills ${bg.length > 1 ? 'these background tasks' : 'this background task'}:\n\n`
+      + bg.map(t => '• ' + t.description).join('\n'))) return;
   try {
     const r = await fetch('/api/chat-cancel', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1888,7 +1926,7 @@ async function checkChatStatus() {
   try {
     const r = await fetch(`/api/chat-status?session=${encodeURIComponent(chat.sessionId)}`);
     const j = await r.json();
-    setStatus(j.running, j.queued || 0);
+    setStatus(j.running, j.queued || 0, j.activity);
     if (j.running && j.partial && (j.partial.text || j.partial.ask || (j.partial.tools && j.partial.tools.length))) {
       renderStreaming(j.partial);
     } else if (!j.running) {

@@ -1246,6 +1246,37 @@ function ingestStreamLine(sessionId, line) {
   lp.updatedAt = Date.now();
 }
 
+// What a turn is doing right now, for the UI status line (/api/chat-status
+// `activity`). Without this the footer only ever said "Claude is working…" —
+// even when Claude had already replied and the process was just waiting on a
+// background task (a `-p` turn stays alive until its background tasks finish,
+// and queued messages wait behind it), or a tool had run silently for minutes.
+function trackActivity(e, o) {
+  const now = Date.now();
+  e.lastEventAt = now;
+  if (o.type === 'assistant' && o.message) {
+    e.replied = false; // producing again (e.g. reacting to a task notification)
+    for (const b of o.message.content || []) {
+      if (b.type === 'tool_use') e.curTool = { name: b.name, detail: clip(toolDetail(b.name, b.input)), since: now };
+    }
+  } else if (o.type === 'user' && Array.isArray(o.message && o.message.content)
+             && o.message.content.some(b => b.type === 'tool_result')) {
+    e.curTool = null;
+  } else if (o.type === 'result') {
+    e.replied = true; e.repliedAt = now; e.curTool = null;
+  } else if (o.type === 'system') {
+    if (o.subtype === 'task_started') (e.taskStart || (e.taskStart = {}))[o.task_id] = now;
+    else if (o.subtype === 'background_tasks_changed') {
+      e.bg = (o.tasks || []).map(t => ({
+        id: t.task_id, description: t.description || t.task_type || 'background task',
+        since: (e.taskStart && e.taskStart[t.task_id]) || now,
+      }));
+    } else if (o.subtype === 'task_notification') {
+      e.bg = (e.bg || []).filter(t => t.id !== o.task_id);
+    }
+  }
+}
+
 // Stop a running turn the moment it asks a question (see ingestStreamLine).
 // SIGTERM (not cancel) so finalizeTurn doesn't log it as an error and Claude
 // Code flushes the question to the transcript; the UI renders it from there.
@@ -1366,7 +1397,7 @@ function pumpLogs(sessionId, flush) {
           }
           // A terminal `result` line means the turn actually finished — that's
           // how we tell "done" from "interrupted" when reattaching to a pid.
-          try { const o = JSON.parse(line); if (o.type === 'result') { e.sawResult = true; if (o.is_error) e.sawErrResult = true; } } catch {}
+          try { const o = JSON.parse(line); if (o.type === 'result') { e.sawResult = true; if (o.is_error) e.sawErrResult = true; } trackActivity(e, o); } catch {}
           ingestStreamLine(sessionId, line);
         }
       }
@@ -1391,10 +1422,13 @@ function tick(sessionId) {
   const e = runningChats.get(sessionId);
   if (!e) return;
   pumpLogs(sessionId, false);
-  // A reattached turn (no child handle) is done when it either produced its
-  // terminal result — the authoritative "finished" signal, robust to pid reuse —
-  // or its pid is gone. sawResult ⇒ a clean finish; pid gone without it ⇒ interrupted.
-  if (e.reattached && (e.sawResult || (e.pid && !isAlive(e.pid)))) {
+  // A reattached turn (no child handle) is done when its pid is gone. NOT at its
+  // first `result`: a `-p` turn stays alive after replying while its background
+  // tasks run (and emits another result per task notification) — finalizing at
+  // the first one let a queued message start a second process on the same
+  // session. Pid reuse is ruled out once, at reattach (pidIsTurn). sawResult
+  // still decides clean finish vs. interrupted.
+  if (e.reattached && e.pid && !isAlive(e.pid)) {
     finalizeTurn(sessionId, null, { interrupted: true });
   }
 }
@@ -1521,6 +1555,17 @@ function armStallGuard(sessionId, e) {
   }, STALL_CHECK_MS);
 }
 
+function activityOf(e) {
+  if (!e || !e.outFile) return null; // assess/handover one-shots have no stream
+  return {
+    startedAt: e.startedAt,
+    lastEventAt: e.lastEventAt || e.startedAt,
+    replied: !!e.replied,
+    tool: e.curTool || null,
+    background: e.bg || [],
+  };
+}
+
 function drainQueue(sessionId) {
   if (runningChats.has(sessionId)) return;
   const q = chatQueues.get(sessionId);
@@ -1535,6 +1580,17 @@ function drainQueue(sessionId) {
 // Reattach to a turn that was still running when a previous server process
 // exited: no child handle, so we tail its logs and watch its pid for
 // completion. Replays the log already on disk so the live view isn't blank.
+// Is `pid` still the claude process running this session's turn? (Guards against
+// pid reuse across a restart: alive alone isn't enough.)
+function pidIsTurn(pid, sessionId) {
+  if (!pid || !isAlive(pid)) return false;
+  if (process.platform === 'win32') return true; // no `ps`; alive is the best we have
+  try {
+    const cmd = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    return cmd.includes(sessionId);
+  } catch { return false; }
+}
+
 function reattachTurn(sessionId, r) {
   const e = mkEntry(sessionId, {
     pid: r.pid, child: null, cwd: r.cwd, mode: r.mode, model: r.model,
@@ -1545,9 +1601,10 @@ function reattachTurn(sessionId, r) {
   livePartial.set(sessionId, { text: '', tools: [], ask: null, updatedAt: Date.now() });
   runningChats.set(sessionId, e);
   pumpLogs(sessionId, false);                  // catch up on output written before this boot
-  // Already finished before we got here (result in the log)? Finalize now
-  // rather than waiting on a pid that may have been recycled.
-  if (e.sawResult) return finalizeTurn(sessionId, null, { interrupted: true });
+  // Process already gone (or its pid recycled by something else)? Finalize now
+  // from the logs. A live pid that's still this session's claude is reattached
+  // even if it already replied — it may be waiting on background tasks.
+  if (!pidIsTurn(e.pid, sessionId)) return finalizeTurn(sessionId, null, { interrupted: true });
   e.tailTimer = setInterval(() => tick(sessionId), TAIL_MS);
   armStallGuard(sessionId, e);
 }
@@ -3182,6 +3239,7 @@ const server = http.createServer((req, res) => {
       // be continued; the UI shows this as a gentle notice, not a crash.
       interrupted: lastChatErrorKind.get(id) === 'interrupted',
       partial: lp ? { text: lp.text, tools: lp.tools, ask: lp.ask || null } : null,
+      activity: activityOf(runningChats.get(id)),
     });
   }
 
