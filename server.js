@@ -1210,6 +1210,13 @@ function chatTurn(sessionId, text, images, newCwd, cb) {
 
   if (!chatQueues.has(sessionId)) chatQueues.set(sessionId, []);
   const q = chatQueues.get(sessionId);
+  // A turn is already running and still accepting input: hand the message
+  // straight to it (terminal-like) rather than queueing it behind the whole
+  // turn — including any background task it's waiting on. Only when nothing is
+  // queued ahead, so messages are never reordered.
+  if (!q.length && injectMessage(sessionId, prompt)) {
+    return cb(null, { running: true, queued: 0, delivered: true });
+  }
   q.push({ text: prompt, cwd });
   persistQueue();
   const position = (runningChats.has(sessionId) ? 1 : 0) + q.length - 1;
@@ -1264,6 +1271,7 @@ function trackActivity(e, o) {
     e.curTool = null;
   } else if (o.type === 'result') {
     e.replied = true; e.repliedAt = now; e.curTool = null;
+    endInputWhenIdle(e); // no-op while background tasks remain (bg is set before the result)
   } else if (o.type === 'system') {
     if (o.subtype === 'task_started') (e.taskStart || (e.taskStart = {}))[o.task_id] = now;
     else if (o.subtype === 'background_tasks_changed') {
@@ -1441,6 +1449,8 @@ function finalizeTurn(sessionId, err, opts = {}) {
   e.finalizing = true;
   if (e.timer) clearTimeout(e.timer);
   if (e.tailTimer) clearInterval(e.tailTimer);
+  if (e.endTimer) clearTimeout(e.endTimer);
+  e.inputEnded = true;
   pumpLogs(sessionId, true);                   // fold the tail before deciding
   runningChats.delete(sessionId);
   livePartial.delete(sessionId);
@@ -1479,7 +1489,13 @@ function spawnTurn(sessionId, text, cwd, mode, model) {
   // us read assistant blocks as they land.
   const exists = findSessionFile(sessionId);
   const base = exists ? ['--resume', sessionId] : ['--session-id', sessionId];
-  const args = [...base, '-p', text, '--output-format', 'stream-json', '--verbose'];
+  // The prompt goes in on stdin as stream-json, and stdin stays open for the
+  // life of the turn — so a message sent while the turn is still running (most
+  // often: Claude replied but is waiting on a background task) is delivered
+  // straight into the live process, like typing in a terminal, instead of
+  // queueing behind it (see injectMessage). Input is closed once the turn is
+  // idle (endInputWhenIdle); the CLI then finishes up and exits.
+  const args = [...base, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
   // bypassPermissions keeps the historical skip-flag behavior (honoring
   // CLAUDE_SAFE); any other mode is passed straight through to the CLI.
   if (mode === 'bypassPermissions') {
@@ -1496,14 +1512,16 @@ function spawnTurn(sessionId, text, cwd, mode, model) {
   try {
     outFd = fs.openSync(outFile, 'w');         // truncate any prior turn's logs
     errFd = fs.openSync(errFile, 'w');
-    // stdin ignored: a -p turn reads none, and an open stdin pipe makes the CLI
-    // warn ("no stdin data received in 3s") and stall. detached:true makes the
-    // child its own process-group leader so it survives our restart.
+    // stdin is a pipe we write stream-json user messages into (the first one
+    // immediately, below). If the server dies, the pipe closes: the CLI treats
+    // that EOF gracefully — finishes the current work, waits for background
+    // tasks, then exits — so a restart never kills the turn. detached:true makes
+    // the child its own process-group leader so it survives our restart.
     // PYTHONUNBUFFERED: Python block-buffers stdout when it isn't a TTY, so a
     // long script Claude runs (e.g. an API retry loop) showed nothing until it
     // exited — Claude, and its background-task output file, saw no progress for
     // minutes. Unbuffered output lets it watch progress as it happens.
-    child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['ignore', outFd, errFd], detached: true,
+    child = spawn(CLAUDE_BIN, args, { cwd, stdio: ['pipe', outFd, errFd], detached: true,
       env: { ...process.env, PYTHONUNBUFFERED: process.env.PYTHONUNBUFFERED || '1' } });
   } catch (err) {
     try { if (outFd != null) fs.closeSync(outFd); } catch {}
@@ -1517,9 +1535,12 @@ function spawnTurn(sessionId, text, cwd, mode, model) {
   child.unref();
 
   const e = mkEntry(sessionId, { pid: child.pid, child, cwd, mode, model, outFile, errFile });
+  e.stdin = child.stdin;
+  child.stdin.on('error', () => { e.inputEnded = true; }); // EPIPE if the CLI already exited
   livePartial.set(sessionId, { text: '', tools: [], ask: null, updatedAt: Date.now() });
   runningChats.set(sessionId, e);
   persistRuns();
+  writeUserMessage(e, text);
 
   child.on('error', err => finalizeTurn(sessionId, err));
   child.on('exit', code => finalizeTurn(sessionId, code === 0 ? null : new Error('claude exited with code ' + code)));
@@ -1558,6 +1579,49 @@ function armStallGuard(sessionId, e) {
     lastChatErrorKind.set(sessionId, 'interrupted'); // gentle UI treatment, no "Turn error:" prefix
     killEntry(e);
   }, STALL_CHECK_MS);
+}
+
+function writeUserMessage(e, text) {
+  e.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n');
+  e.replied = false;         // a reply is now owed — don't close input before it
+  e.lastInputAt = Date.now();
+}
+
+// Can a new message go straight into this running turn? Only a turn we spawned
+// this process (a reattached one has no stdin) whose input is still open.
+function canInject(e) {
+  return !!(e && e.stdin && !e.inputEnded && !e.killed && !e.finalizing);
+}
+
+// Deliver a message into a running turn (see spawnTurn). Mid-tool, the CLI
+// folds it into the current turn at the next step; while Claude is only
+// waiting on a background task, it answers right away.
+function injectMessage(sessionId, text) {
+  const e = runningChats.get(sessionId);
+  if (!canInject(e)) return false;
+  try { writeUserMessage(e, text); } catch { return false; }
+  clearTimeout(e.endTimer);
+  // Start the live preview fresh for this reply; earlier replies are already
+  // in the transcript the UI renders.
+  const lp = livePartial.get(sessionId);
+  if (lp) { lp.text = ''; lp.tools = []; lp.ask = null; lp.updatedAt = Date.now(); }
+  return true;
+}
+
+// Close a turn's input once it's idle — replied, no background tasks left, and
+// nothing just sent — so the CLI exits instead of waiting for more input. A
+// short grace absorbs races with a message arriving as the reply lands (and a
+// message already written before the close is still processed: EOF is graceful).
+const INPUT_GRACE_MS = 1500;
+function endInputWhenIdle(e) {
+  if (!e.stdin || e.inputEnded) return;
+  clearTimeout(e.endTimer);
+  e.endTimer = setTimeout(() => {
+    if (e.inputEnded || !e.replied || (e.bg && e.bg.length)) return;
+    if (Date.now() - (e.lastInputAt || 0) < INPUT_GRACE_MS) return endInputWhenIdle(e);
+    e.inputEnded = true;
+    try { e.stdin.end(); } catch {}
+  }, INPUT_GRACE_MS);
 }
 
 function activityOf(e) {

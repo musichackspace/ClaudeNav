@@ -82,7 +82,20 @@ removes both agents.
 - `POST /api/chat {session, text, images, cwd}` — run a headless turn
   (`--resume`, or `--session-id` to create a new one), via
   `--output-format stream-json --verbose` so blocks can be previewed live.
-  Queued one-at-a-time per session; `cwd` is only used when creating. **Turns
+  **Messages go in on stdin** (`--input-format stream-json`), and stdin stays
+  open while the turn runs: a message sent to a running turn is **delivered
+  straight into the live process** (`injectMessage`, response `delivered:true`)
+  instead of queueing behind it — mid-tool the CLI folds it into the current
+  turn at the next step; while Claude is only waiting on a background task it
+  answers at once (verified: ~1s, background task unaffected). This is the
+  terminal-equivalent fix for "my message sat queued for minutes behind a
+  background retry/upload". Input is closed once the turn is idle (`result`
+  seen, no background tasks, 1.5s grace — `endInputWhenIdle`) so the CLI exits.
+  EOF is graceful (finishes work, waits for background tasks), so a server
+  restart can't kill a turn; a **reattached** turn has no stdin, so messages to
+  it fall back to the per-session queue (one-at-a-time, drained on exit), as do
+  messages sent while something is already queued (never reordered). `cwd` is
+  only used when creating. **Turns
   are spawned detached** (own process group, `child.unref()`) with stdout/stderr
   redirected to per-turn log files under `~/.claude/claudenav-turns-<PORT>/`, and
   the live preview + auth/usage detection are driven by *tailing those files*
